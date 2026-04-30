@@ -21,6 +21,26 @@ export function pickRandom<T>(arr: T[]): T | null {
   return arr[Math.floor(Math.random() * arr.length)]!;
 }
 
+/** Fisher–Yates shuffle (mutates array in place). */
+export function shuffleInPlace<T>(arr: T[]): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = arr[i]!;
+    arr[i] = arr[j]!;
+    arr[j] = t;
+  }
+}
+
+/**
+ * How many tracks to pull from Spotify per player — tied to `rounds`, not the whole library.
+ * Extra headroom helps deep cuts (only “unique to you” tracks) and preview misses.
+ */
+export function trackPoolSampleTarget(rounds: number, deepCuts: boolean): number {
+  const r = Math.max(5, Math.min(20, rounds));
+  const mult = deepCuts ? 8 : 5;
+  return Math.min(200, Math.max(r * mult, r + 15));
+}
+
 export function normalizeRoom(row: Record<string, unknown>): RoomRow {
   const settings = (row.settings ?? {}) as RoomSettings;
   return {

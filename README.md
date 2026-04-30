@@ -1,6 +1,6 @@
 # spotBattle
 
-Multiplayer party game: connect Spotify, join a room, and guess **whose** track is playing. Songs without a 30-second preview are skipped. **Deep cuts** mode only uses tracks that appear in exactly one player’s pool.
+Multiplayer party game: connect Spotify, join a room, and guess **whose** track is playing. **Load my playlists / liked songs** pulls a **random sample** sized to the room’s **round count** (not your whole library), then tries Deezer for 30s preview URLs; rounds can still use tracks with no clip (title/artist only). **Deep cuts** mode only uses tracks that appear in exactly one player’s pool.
 
 ## Stack
 
@@ -48,7 +48,17 @@ The repo includes `vercel.json`: **Other / no framework**, `npm run build` → `
 3. Confirm the latest deployment **Build** logs show a successful export and that **Output** is `dist` (you should see `index.html` in the build output).
 4. **Spotify**: add your live redirect URI (usually `https://<your-domain>/spotify-auth`) — copy the exact string from the in-app lobby if unsure.
 
+If the lobby loads but you see **`Spotify (502): An unexpected error occurred…`**, the **web deploy is fine** (Supabase + UI work). That message is Spotify’s **Web API** returning a transient 502 after retries—wait a few minutes, try again, or check [Spotify status](https://status.spotify.com/). It is not a Vercel misconfiguration when the room and redirect hint already show correctly.
+
 If you see **404: NOT_FOUND** on the Vercel URL, the usual cause is an **empty or wrong output directory** (build never ran `expo export`, or Vercel used a different preset). Fix: ensure this `vercel.json` is deployed, **Node 20.x** in project settings, env vars set, then **Redeploy**.
+
+### Preview audio on **web** (Deezer)
+
+Spotify’s Web API often omits `preview_url`. The app fills gaps via **Deezer’s public API** using ISRC. Deezer’s responses **do not include `Access-Control-Allow-Origin`**, so **in-browser** `fetch` to `api.deezer.com` fails silently and you see **0 with preview audio** even with a small random sample.
+
+- **Production (Vercel):** the repo includes `api/deezer-preview.js`, which proxies Deezer with open CORS. The web client calls **`/api/deezer-preview`** on the **same origin** as the static app, so previews work after deploy.
+- **Local `expo start --web`:** Metro does not run that API. Set **`EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL`** to your deployed proxy base, e.g. `https://YOUR_APP.vercel.app/api/deezer-preview`, then restart Expo (`-c`). See `.env.example`.
+- **iOS / Android / Expo Go:** no CORS — direct Deezer calls work.
 
 ## Run locally
 

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,6 +20,7 @@ import {
   normalizeRoom,
   pickRandom,
   playableEntries,
+  trackPoolSampleTarget,
 } from '@/lib/gameLogic';
 import { supabase } from '@/lib/supabase';
 import {
@@ -186,16 +188,17 @@ export default function RoomScreen() {
         setLoadErr('Connect Spotify first.');
         return;
       }
+      const poolTarget = trackPoolSampleTarget(room.settings.rounds, room.settings.deepCuts);
       let tracks: GameTrack[] = [];
       if (room.settings.songSource === 'liked') {
-        setBusy('Loading liked songs…');
-        tracks = await fetchSavedTracks(token);
+        setBusy(`Loading liked songs (up to ${poolTarget} random picks for this game)…`);
+        tracks = await fetchSavedTracks(token, { sampleTarget: poolTarget });
       } else {
         setBusy('Loading your playlists…');
         const lists = await fetchAllPlaylistIds(token);
         const ids = lists.map((l) => l.id);
-        setBusy('Loading tracks from playlists…');
-        tracks = await fetchTracksFromPlaylists(token, ids);
+        setBusy(`Loading tracks from playlists (up to ${poolTarget} random picks)…`);
+        tracks = await fetchTracksFromPlaylists(token, ids, { sampleTarget: poolTarget });
       }
       setBusy('Looking up preview audio (Deezer by ISRC)…');
       tracks = await enrichTracksWithDeezerPreviews(tracks);
@@ -209,12 +212,16 @@ export default function RoomScreen() {
       } else {
         const withPreview = tracks.filter((t) => t.previewUrl).length;
         if (withPreview === 0) {
+          const webHint =
+            Platform.OS === 'web'
+              ? ' On web, Deezer must be called via your deployed `/api/deezer-preview` proxy (or set EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL for local dev); direct browser calls to Deezer are blocked by CORS.'
+              : '';
           setTrackNotice(
-            `${tracks.length} tracks saved; still no preview URLs (Spotify omits them and Deezer had no ISRC match for these tracks). Play from title & artist only, or try a smaller playlist set.`
+            `${tracks.length} tracks saved (random sample for this room’s round count); still no preview URLs (Spotify often omits them; Deezer needs a matching ISRC and a working lookup). Play from title & artist only, or try again.${webHint}`
           );
         } else if (withPreview < tracks.length) {
           setTrackNotice(
-            `${tracks.length} tracks saved — ${withPreview} with preview audio (Spotify and/or Deezer), ${tracks.length - withPreview} without.`
+            `${tracks.length} tracks in your pool — ${withPreview} with preview audio (Spotify and/or Deezer), ${tracks.length - withPreview} without.`
           );
         }
       }
@@ -238,7 +245,8 @@ export default function RoomScreen() {
 
   async function castVote(targetPlayerId: string) {
     if (!me?.id || !room || room.phase !== 'guess') return;
-    if (targetPlayerId === room.correct_player_id) return;
+    // Song owner already knows it's theirs — they don't cast a guess.
+    if (me.id === room.correct_player_id) return;
     const { error } = await supabase
       .from('room_players')
       .update({ current_vote_player_id: targetPlayerId })
@@ -537,25 +545,24 @@ export default function RoomScreen() {
           <Text style={styles.roundMeta}>
             Round {room.round_number} / {room.settings.rounds}
           </Text>
-          <View style={styles.choices}>
-            {players.map((p) => {
-              const disabled = p.id === room.correct_player_id;
-              const selected = me?.current_vote_player_id === p.id;
-              return (
-                <Pressable
-                  key={p.id}
-                  onPress={() => void castVote(p.id)}
-                  disabled={disabled || !me}
-                  style={[
-                    styles.choice,
-                    disabled && styles.choiceDisabled,
-                    selected && styles.choiceSelected,
-                  ]}>
-                  <Text style={styles.choiceText}>{p.nickname}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          {me?.id === room.correct_player_id ? (
+            <Text style={styles.muted}>You played this track — wait while others guess.</Text>
+          ) : (
+            <View style={styles.choices}>
+              {players.map((p) => {
+                const selected = me?.current_vote_player_id === p.id;
+                return (
+                  <Pressable
+                    key={p.id}
+                    onPress={() => void castVote(p.id)}
+                    disabled={!me}
+                    style={[styles.choice, selected && styles.choiceSelected]}>
+                    <Text style={styles.choiceText}>{p.nickname}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
           {isHost ? (
             <Pressable style={styles.secondary} onPress={() => void revealRound()}>
               <Text style={styles.secondaryText}>Reveal now</Text>
@@ -664,7 +671,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.border,
   },
-  choiceDisabled: { opacity: 0.35 },
   choiceSelected: { borderColor: theme.accent },
   choiceText: { color: theme.text, fontSize: 16, fontWeight: '700' },
   answer: { fontSize: 18, fontWeight: '700', color: theme.accent, marginTop: 6 },

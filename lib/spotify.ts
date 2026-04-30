@@ -5,6 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
 
 import { browserLocalStorageAsync } from '@/lib/browserStorage';
+import { shuffleInPlace } from '@/lib/gameLogic';
 import type { GameTrack } from '@/lib/types';
 
 // On web, only call `maybeCompleteAuthSession` from `app/spotify-auth.tsx` (OAuth return URL).
@@ -248,7 +249,10 @@ function spotifyTransientHint(status: number, bodyText: string): string {
   const b = bodyText.toLowerCase();
   if (status === 502 || status === 503 || status === 504) {
     if (b.includes('unexpected error') || b.includes('try again')) {
-      return ' (This app already retried several times; try again in a few minutes.)';
+      return (
+        ' (This app already retried several times; try again in a few minutes.)' +
+        ' Temporary Spotify API issue—not your Vercel or redirect URI. status.spotify.com if it persists.'
+      );
     }
     return " Spotify’s servers may be busy—try again shortly.";
   }
@@ -383,13 +387,24 @@ function toGameTrack(t: SpotifyTrackItem['track']): GameTrack | null {
   };
 }
 
+export type FetchTracksSampleOptions = {
+  /** When set, stop after enough candidates, shuffle, and return at most this many tracks. */
+  sampleTarget?: number;
+};
+
 export async function fetchTracksFromPlaylists(
   token: string,
-  playlistIds: string[]
+  playlistIds: string[],
+  options?: FetchTracksSampleOptions
 ): Promise<GameTrack[]> {
+  const k = options?.sampleTarget;
   const byId = new Map<string, GameTrack>();
-  const capped = playlistIds.slice(0, MAX_PLAYLIST_IDS);
-  for (const pid of capped) {
+  const pids = [...playlistIds];
+  shuffleInPlace(pids);
+  const capped = pids.slice(0, MAX_PLAYLIST_IDS);
+  let scannedItems = 0;
+
+  outer: for (const pid of capped) {
     let url: string | null = withMarket(
       `/playlists/${encodeURIComponent(pid)}/tracks?limit=100&fields=${encodeURIComponent('next,items(track(id,name,preview_url,album(images),artists(name),external_ids(isrc)))')}`
     );
@@ -400,14 +415,28 @@ export async function fetchTracksFromPlaylists(
       const items = page.items ?? [];
       for (const it of items) {
         const gt = toGameTrack(it.track);
-        if (gt) byId.set(gt.id, gt);
+        if (gt) {
+          byId.set(gt.id, gt);
+          scannedItems += 1;
+        }
+        if (k) {
+          const enough =
+            byId.size >= Math.min(180, k * 3) ||
+            (byId.size >= k && scannedItems >= Math.max(40, k * 6));
+          if (enough || scannedItems >= k * 40) break outer;
+        }
       }
       url = page.next
         ? page.next.replace('https://api.spotify.com/v1', '')
         : null;
     }
   }
-  return [...byId.values()];
+  const values = [...byId.values()];
+  if (k && values.length > k) {
+    shuffleInPlace(values);
+    return values.slice(0, k);
+  }
+  return values;
 }
 
 type SpotifySavedPage = {
@@ -415,24 +444,48 @@ type SpotifySavedPage = {
   next: string | null;
 };
 
-export async function fetchSavedTracks(token: string): Promise<GameTrack[]> {
+export async function fetchSavedTracks(
+  token: string,
+  options?: FetchTracksSampleOptions
+): Promise<GameTrack[]> {
+  const k = options?.sampleTarget;
   const byId = new Map<string, GameTrack>();
   const savedFields = encodeURIComponent(
     'next,items(track(id,name,preview_url,album(images),artists(name),external_ids(isrc)))'
   );
   let url: string | null = withMarket(`/me/tracks?limit=50&fields=${savedFields}`);
   let pages = 0;
+  let scannedItems = 0;
   while (url && pages < MAX_SAVED_TRACK_PAGES) {
     pages += 1;
     const page = (await spotifyFetch(url, token)) as SpotifySavedPage;
     const items = page.items ?? [];
     for (const it of items) {
       const gt = toGameTrack(it.track);
-      if (gt) byId.set(gt.id, gt);
+      if (gt) {
+        byId.set(gt.id, gt);
+        scannedItems += 1;
+      }
+      if (k) {
+        const enough =
+          byId.size >= Math.min(180, k * 3) ||
+          (byId.size >= k && scannedItems >= Math.max(40, k * 6));
+        if (enough || scannedItems >= k * 40) {
+          url = null;
+          break;
+        }
+      }
     }
-    url = page.next
-      ? page.next.replace('https://api.spotify.com/v1', '')
+    url = url
+      ? page.next
+        ? page.next.replace('https://api.spotify.com/v1', '')
+        : null
       : null;
   }
-  return [...byId.values()];
+  const values = [...byId.values()];
+  if (k && values.length > k) {
+    shuffleInPlace(values);
+    return values.slice(0, k);
+  }
+  return values;
 }

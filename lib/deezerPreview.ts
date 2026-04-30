@@ -1,9 +1,14 @@
 import type { GameTrack } from '@/lib/types';
+import { Platform } from 'react-native';
 
 /**
  * Spotify’s Web API often omits `preview_url`. Deezer’s public API exposes a 30s MP3
  * `preview` URL when queried by ISRC (`/track/isrc:{code}`). This is a best-effort
  * supplement; not every track exists on Deezer, and large pools take time.
+ *
+ * **Web:** Deezer does not send `Access-Control-Allow-Origin`, so browsers block direct
+ * `fetch` to api.deezer.com. Use same-origin `/api/deezer-preview` (Vercel) or
+ * `EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL` (e.g. your deployed site) when running web locally.
  *
  * @see https://developers.deezer.com/api/track
  */
@@ -11,11 +16,24 @@ import type { GameTrack } from '@/lib/types';
 const CONCURRENCY = 8;
 const BATCH_PAUSE_MS = 150;
 
+function deezerFetchUrl(isrcEncoded: string): string {
+  const envProxy = process.env.EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL?.replace(/\/$/, '') ?? '';
+  if (Platform.OS === 'web') {
+    if (envProxy) return `${envProxy}?isrc=${isrcEncoded}`;
+    if (typeof window !== 'undefined' && window.location?.host) {
+      const { protocol, host } = window.location;
+      return `${protocol}//${host}/api/deezer-preview?isrc=${isrcEncoded}`;
+    }
+  }
+  return `https://api.deezer.com/track/isrc:${isrcEncoded}`;
+}
+
 async function deezerPreviewUrlForIsrc(isrc: string): Promise<string | null> {
   const clean = isrc.trim().toUpperCase().replace(/\s+/g, '');
   if (!clean) return null;
+  const isrcEncoded = encodeURIComponent(clean);
   try {
-    const res = await fetch(`https://api.deezer.com/track/isrc:${encodeURIComponent(clean)}`);
+    const res = await fetch(deezerFetchUrl(isrcEncoded));
     if (!res.ok) return null;
     const j = (await res.json()) as { preview?: string; error?: unknown };
     if (j.error) return null;
