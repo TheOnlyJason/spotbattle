@@ -1,6 +1,6 @@
 # spotBattle
 
-Multiplayer party game: connect Spotify, join a room, and guess **whose** track is playing. **Load my playlists / liked songs** pulls a **random sample** sized to the room’s **round count** (not your whole library), then tries Deezer for 30s preview URLs; rounds can still use tracks with no clip (title/artist only). **Deep cuts** mode only uses tracks that appear in exactly one player’s pool.
+Multiplayer party game: connect Spotify, join a room, and guess **whose** track is playing. **Load my playlists / liked songs** pulls a larger **random sample** from Spotify, runs Deezer for 30s previews, then **keeps only tracks that have preview audio** (up to a pool size based on **round count**). **Deep cuts** mode only uses tracks that appear in exactly one player’s pool.
 
 ## Stack
 

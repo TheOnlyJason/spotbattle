@@ -20,6 +20,8 @@ import {
   normalizeRoom,
   pickRandom,
   playableEntries,
+  shuffleInPlace,
+  trackPoolFetchSampleTarget,
   trackPoolSampleTarget,
 } from '@/lib/gameLogic';
 import { supabase } from '@/lib/supabase';
@@ -189,41 +191,38 @@ export default function RoomScreen() {
         return;
       }
       const poolTarget = trackPoolSampleTarget(room.settings.rounds, room.settings.deepCuts);
+      const fetchSize = trackPoolFetchSampleTarget(poolTarget);
       let tracks: GameTrack[] = [];
       if (room.settings.songSource === 'liked') {
-        setBusy(`Loading liked songs (up to ${poolTarget} random picks for this game)…`);
-        tracks = await fetchSavedTracks(token, { sampleTarget: poolTarget });
+        setBusy(`Loading liked songs (sampling ${fetchSize} for previews)…`);
+        tracks = await fetchSavedTracks(token, { sampleTarget: fetchSize });
       } else {
         setBusy('Loading your playlists…');
         const lists = await fetchAllPlaylistIds(token);
         const ids = lists.map((l) => l.id);
-        setBusy(`Loading tracks from playlists (up to ${poolTarget} random picks)…`);
-        tracks = await fetchTracksFromPlaylists(token, ids, { sampleTarget: poolTarget });
+        setBusy(`Loading tracks from playlists (sampling ${fetchSize} for previews)…`);
+        tracks = await fetchTracksFromPlaylists(token, ids, { sampleTarget: fetchSize });
       }
       setBusy('Looking up preview audio (Deezer by ISRC)…');
       tracks = await enrichTracksWithDeezerPreviews(tracks);
+      const withPreview = tracks.filter((t) => Boolean(t.previewUrl));
+      shuffleInPlace(withPreview);
+      tracks = withPreview.slice(0, poolTarget);
       const { error } = await supabase.from('room_players').update({ track_pool: tracks }).eq('id', me.id);
       if (error) throw error;
       await refreshLocal();
       if (tracks.length === 0) {
+        const webHint =
+          Platform.OS === 'web'
+            ? ' On web, set EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL or use a deployed build with /api/deezer-preview.'
+            : '';
         setLoadErr(
-          'No tracks were returned from Spotify (empty library or API issue). Try Liked songs or check your connection.'
+          `No previewable tracks in this sample (${fetchSize} tried). Try different playlists, Liked songs, or reload.${webHint}`
         );
-      } else {
-        const withPreview = tracks.filter((t) => t.previewUrl).length;
-        if (withPreview === 0) {
-          const webHint =
-            Platform.OS === 'web'
-              ? ' On web, Deezer must be called via your deployed `/api/deezer-preview` proxy (or set EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL for local dev); direct browser calls to Deezer are blocked by CORS.'
-              : '';
-          setTrackNotice(
-            `${tracks.length} tracks saved (random sample for this room’s round count); still no preview URLs (Spotify often omits them; Deezer needs a matching ISRC and a working lookup). Play from title & artist only, or try again.${webHint}`
-          );
-        } else if (withPreview < tracks.length) {
-          setTrackNotice(
-            `${tracks.length} tracks in your pool — ${withPreview} with preview audio (Spotify and/or Deezer), ${tracks.length - withPreview} without.`
-          );
-        }
+      } else if (tracks.length < poolTarget) {
+        setTrackNotice(
+          `${tracks.length} previewable tracks saved (wanted up to ${poolTarget} — try more playlists or run “Load” again).`
+        );
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Fetch failed';

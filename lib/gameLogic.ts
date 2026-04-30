@@ -41,6 +41,14 @@ export function trackPoolSampleTarget(rounds: number, deepCuts: boolean): number
   return Math.min(200, Math.max(r * mult, r + 15));
 }
 
+/**
+ * How many tracks to request from Spotify before we filter to **preview-only** tracks.
+ * Oversampling offsets Spotify/Deezer misses while keeping Deezer calls bounded.
+ */
+export function trackPoolFetchSampleTarget(poolTarget: number): number {
+  return Math.min(350, Math.max(120, poolTarget * 6));
+}
+
 export function normalizeRoom(row: Record<string, unknown>): RoomRow {
   const settings = (row.settings ?? {}) as RoomSettings;
   return {
