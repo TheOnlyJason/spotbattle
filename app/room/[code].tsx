@@ -8,11 +8,11 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ConfettiCelebration } from '@/components/ConfettiCelebration';
 import { TrackPreview } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
@@ -34,19 +34,105 @@ import {
   fetchSpotifyProfile,
   fetchTracksFromPlaylists,
   getValidAccessToken,
+  hasSpotifySession,
+  LIKED_SONGS_SOURCE_NAME,
   saveSpotifySession,
   spotifyRedirectUri,
-  spotifyUsesDynamicRedirect,
   useSpotifyAuthRequest,
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
-import type { GameTrack, RoomPlayerRow, RoomRow } from '@/lib/types';
+import type { GameTrack, RoomPlayerRow, RoomRow, SongSource } from '@/lib/types';
 import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
-import { uniqueTracksPerPlayer } from '@/lib/uniquePool';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
 /** Must match `advance_from_reveal` dwell in Supabase migration. */
 const REVEAL_DWELL_MS = 3000;
+
+/** High-contrast quiz-style tiles for guess voting (cycles by player order). */
+type GuessQuizPalette = { bg: string; border: string; fg: string };
+
+const GUESS_PLAYER_PALETTE: GuessQuizPalette[] = [
+  { bg: '#1d4ed8', border: '#3b82f6', fg: '#ffffff' },
+  { bg: '#b91c1c', border: '#f87171', fg: '#ffffff' },
+  { bg: '#047857', border: '#34d399', fg: '#ffffff' },
+  { bg: '#b45309', border: '#fbbf24', fg: '#fffbeb' },
+  { bg: '#6d28d9', border: '#c084fc', fg: '#ffffff' },
+  { bg: '#9d174d', border: '#f472b6', fg: '#ffffff' },
+  { bg: '#0e7490', border: '#22d3ee', fg: '#ffffff' },
+  { bg: '#3f6212', border: '#a3e635', fg: '#f7fee7' },
+];
+
+function guessDisplayNameFontSize(name: string): number {
+  const n = name.trim().length;
+  if (n <= 4) return 32;
+  if (n <= 9) return 28;
+  return 24;
+}
+
+function guessDisplayNameLineHeight(fontSize: number): number {
+  return Math.round(fontSize * 1.12);
+}
+
+function trackSourceLabelForReveal(songSource: SongSource, track: GameTrack): string | null {
+  if (songSource === 'liked') {
+    return track.sourcePlaylistName?.trim() || LIKED_SONGS_SOURCE_NAME;
+  }
+  const n = track.sourcePlaylistName?.trim();
+  return n ? n : null;
+}
+
+function playerInitials(nickname: string): string {
+  const t = nickname.trim();
+  if (!t) return '?';
+  const parts = t.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0]!.slice(0, 1) + parts[1]!.slice(0, 1)).toUpperCase();
+  }
+  return t.slice(0, 2).toUpperCase();
+}
+
+const AVATAR_BACKGROUNDS = ['#2d3a59', '#3d2d59', '#2d5942', '#59442d', '#2d5159', '#512d59'] as const;
+
+function avatarBackground(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return AVATAR_BACKGROUNDS[h % AVATAR_BACKGROUNDS.length]!;
+}
+
+/** `null` = ready to start; otherwise user-facing reason (also used under the Start button). */
+function lobbyValidationMessage(room: RoomRow, players: RoomPlayerRow[]): string | null {
+  const minPlayers = UI_DEV_SKIP_SPOTIFY ? 1 : 2;
+  if (players.length < minPlayers) {
+    return minPlayers === 1
+      ? 'Wait for someone to join the room.'
+      : 'You need at least two players before starting.';
+  }
+  for (const p of players) {
+    const pool = p.track_pool ?? [];
+    if (pool.length === 0) {
+      return UI_DEV_SKIP_SPOTIFY
+        ? `${p.nickname} still needs tracks — use Add sample tracks below.`
+        : `${p.nickname} has not loaded their library yet.`;
+    }
+    if (UI_DEV_SKIP_SPOTIFY) continue;
+    if (pool.length > STALE_TRACK_POOL_MAX) {
+      return `${p.nickname} needs to reload their library to a smaller preview-only list.`;
+    }
+    const prev = pool.filter((t) => Boolean(t.previewUrl)).length;
+    if (prev === 0) {
+      return `${p.nickname} has no previewable tracks yet.`;
+    }
+    if (prev < pool.length) {
+      return `${p.nickname} still has songs without previews — reload the library.`;
+    }
+  }
+  const played = new Set<string>();
+  const entries = playableEntries(players, room.settings, played);
+  if (!entries.length) {
+    return 'No playable tracks with current settings. Add more music or turn off Deep cuts.';
+  }
+  return null;
+}
 
 export default function RoomScreen() {
   const { code: rawCode } = useLocalSearchParams<{ code: string }>();
@@ -65,6 +151,12 @@ export default function RoomScreen() {
     undefined
   );
   const voteRequestSeq = useRef(0);
+  const prevRoomIdRef = useRef<string | null>(null);
+  const autoLibraryLoadedKey = useRef<string | null>(null);
+  const lastConfettiBurstKey = useRef<string | null>(null);
+
+  const [roomDissolved, setRoomDissolved] = useState(false);
+  const [spotifyReady, setSpotifyReady] = useState(false);
 
   const [authRequest, response, promptAsync] = useSpotifyAuthRequest(SPOTIFY_CLIENT_ID);
 
@@ -78,6 +170,35 @@ export default function RoomScreen() {
       : (me?.current_vote_player_id ?? null);
   const isHost = Boolean(room && myUserId && room.host_user_id === myUserId);
 
+  const confettiBurstKey = useMemo(() => {
+    if (!room || room.phase !== 'reveal' || !room.reveal_started_at) return null;
+    if (!me?.current_vote_player_id) return null;
+    if (me.current_vote_player_id !== room.correct_player_id) return null;
+    return `${room.id}-${room.round_number}-${room.reveal_started_at}`;
+  }, [
+    room?.id,
+    room?.phase,
+    room?.reveal_started_at,
+    room?.round_number,
+    room?.correct_player_id,
+    me?.current_vote_player_id,
+  ]);
+
+  const [confettiVisible, setConfettiVisible] = useState(false);
+  const onConfettiComplete = useCallback(() => {
+    setConfettiVisible(false);
+  }, []);
+
+  useEffect(() => {
+    if (!confettiBurstKey) {
+      setConfettiVisible(false);
+      return;
+    }
+    if (lastConfettiBurstKey.current === confettiBurstKey) return;
+    lastConfettiBurstKey.current = confettiBurstKey;
+    setConfettiVisible(true);
+  }, [confettiBurstKey]);
+
   useEffect(() => {
     setOptimisticVotePlayerId(undefined);
   }, [room?.phase, room?.round_number]);
@@ -85,9 +206,18 @@ export default function RoomScreen() {
   const refreshLocal = useCallback(async () => {
     const { data: r } = await supabase.from('rooms').select('*').eq('code', code).maybeSingle();
     if (!r) {
-      setLoadErr('Room not found.');
+      if (prevRoomIdRef.current) {
+        setRoom(null);
+        setPlayers([]);
+        setRoomDissolved(true);
+        prevRoomIdRef.current = null;
+      } else {
+        setLoadErr('Room not found.');
+      }
       return;
     }
+    prevRoomIdRef.current = r.id as string;
+    setRoomDissolved(false);
     setLoadErr(null);
     setRoom(normalizeRoom(r as Record<string, unknown>));
     const { data: plist } = await supabase
@@ -169,11 +299,26 @@ export default function RoomScreen() {
           .eq('room_id', rrow.id)
           .eq('user_id', uid);
         await refreshLocal();
+        setSpotifyReady(true);
       } catch (e) {
         setLoadErr(e instanceof Error ? e.message : 'Spotify login failed');
       }
     })();
   }, [response, authRequest, code, refreshLocal]);
+
+  useEffect(() => {
+    prevRoomIdRef.current = null;
+    setRoomDissolved(false);
+    autoLibraryLoadedKey.current = null;
+  }, [code]);
+
+  useEffect(() => {
+    if (UI_DEV_SKIP_SPOTIFY || !SPOTIFY_CLIENT_ID) {
+      setSpotifyReady(false);
+      return;
+    }
+    void hasSpotifySession(SPOTIFY_CLIENT_ID).then(setSpotifyReady);
+  }, []);
 
   async function loadMockTracksForUi() {
     if (!UI_DEV_SKIP_SPOTIFY) return;
@@ -204,24 +349,24 @@ export default function RoomScreen() {
     }
   }
 
-  async function loadMyTracks() {
+  async function loadMyTracks(): Promise<boolean> {
     if (UI_DEV_SKIP_SPOTIFY) {
-      setLoadErr('UI dev mode is on — use “Load mock tracks” instead of Spotify.');
-      return;
+      setLoadErr('UI dev mode is on — use “Add sample tracks” instead of Spotify.');
+      return false;
     }
     if (!room) {
       setLoadErr('Room not loaded yet.');
-      return;
+      return false;
     }
     if (!me?.id) {
       setLoadErr(
         'Your seat in this room is not ready yet. Wait a few seconds, reopen the room, or leave and rejoin with the code — then tap Load again.'
       );
-      return;
+      return false;
     }
     if (!SPOTIFY_CLIENT_ID) {
-      setBusy('Set EXPO_PUBLIC_SPOTIFY_CLIENT_ID in .env');
-      return;
+      setLoadErr('Spotify is not configured in this build.');
+      return false;
     }
     setLoadErr(null);
     setTrackNotice(null);
@@ -231,7 +376,8 @@ export default function RoomScreen() {
       if (!token) {
         setBusy(null);
         setLoadErr('Connect Spotify first.');
-        return;
+        setSpotifyReady(false);
+        return false;
       }
       const poolTarget = trackPoolSampleTarget(room.settings.rounds, room.settings.deepCuts);
       const fetchSize = trackPoolFetchSampleTarget(poolTarget);
@@ -242,9 +388,8 @@ export default function RoomScreen() {
       } else {
         setBusy('Loading your playlists…');
         const lists = await fetchAllPlaylistIds(token);
-        const ids = lists.map((l) => l.id);
         setBusy(`Loading tracks from playlists (sampling ${fetchSize} for previews)…`);
-        tracks = await fetchTracksFromPlaylists(token, ids, { sampleTarget: fetchSize });
+        tracks = await fetchTracksFromPlaylists(token, lists, { sampleTarget: fetchSize });
       }
       setBusy('Looking up preview audio (Deezer by ISRC)…');
       tracks = await enrichTracksWithDeezerPreviews(tracks);
@@ -262,11 +407,15 @@ export default function RoomScreen() {
         setLoadErr(
           `No previewable tracks in this sample (${fetchSize} tried). Try different playlists, Liked songs, or reload.${webHint}`
         );
-      } else if (tracks.length < poolTarget) {
+        return false;
+      }
+      if (tracks.length < poolTarget) {
         setTrackNotice(
           `${tracks.length} previewable tracks saved (wanted up to ${poolTarget} — try more playlists or run “Load” again).`
         );
       }
+      setSpotifyReady(true);
+      return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Fetch failed';
       const hint =
@@ -274,18 +423,75 @@ export default function RoomScreen() {
           ? ' Check your network. On web, ad blockers or strict privacy settings can block Spotify’s API.'
           : '';
       setLoadErr(`${msg}${hint}`);
+      return false;
     } finally {
       setBusy(null);
     }
   }
 
-  async function toggleReady() {
-    if (!me?.id) {
-      setLoadErr('Your seat in this room is not ready yet. Wait or rejoin, then try Ready again.');
-      return;
+  useEffect(() => {
+    if (!room || room.phase !== 'lobby' || room.status !== 'lobby') return;
+    if (UI_DEV_SKIP_SPOTIFY || !SPOTIFY_CLIENT_ID || !me?.id) return;
+    if ((me.track_pool?.length ?? 0) > 0) return;
+    const autoKey = `${room.id}:${room.updated_at ?? ''}`;
+    if (autoLibraryLoadedKey.current === autoKey) return;
+    let cancelled = false;
+    void (async () => {
+      const ok = await hasSpotifySession(SPOTIFY_CLIENT_ID);
+      if (cancelled || !ok) return;
+      await loadMyTracks();
+      if (!cancelled) {
+        autoLibraryLoadedKey.current = autoKey;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally omit loadMyTracks from deps — stable enough for this one-shot auto fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    room?.id,
+    room?.phase,
+    room?.status,
+    room?.updated_at,
+    me?.id,
+    me?.track_pool?.length,
+    SPOTIFY_CLIENT_ID,
+  ]);
+
+  async function setRematchVote(vote: 'yes' | 'no') {
+    if (!room?.id) return;
+    setLoadErr(null);
+    try {
+      const { error } = await supabase.rpc('set_rematch_vote', {
+        p_room_id: room.id,
+        p_vote: vote,
+      });
+      if (error) throw new Error(error.message);
+      if (vote === 'yes') {
+        const { error: e2 } = await supabase.rpc('try_rematch', { p_room_id: room.id });
+        if (e2) throw new Error(e2.message);
+      }
+      await refreshLocal();
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : 'Could not save your choice');
     }
-    const { error } = await supabase.from('room_players').update({ ready: !me.ready }).eq('id', me.id);
-    if (error) setLoadErr(error.message);
+  }
+
+  async function leaveParty() {
+    if (!room?.id) return;
+    setBusy('Leaving…');
+    setLoadErr(null);
+    try {
+      const { error } = await supabase.rpc('leave_room', { p_room_id: room.id });
+      if (error) throw new Error(error.message);
+      router.replace('/');
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : 'Could not leave room');
+      await refreshLocal();
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function persistVoteChoice(playerRowId: string, nextVote: string | null) {
@@ -321,17 +527,57 @@ export default function RoomScreen() {
     })();
   }
 
-  const poolStats = useMemo(() => {
-    const pools: Record<string, GameTrack[]> = {};
-    for (const p of players) pools[p.id] = p.track_pool ?? [];
-    const unique = uniqueTracksPerPlayer(pools);
-    return players.map((p) => ({
-      id: p.id,
-      nick: p.nickname,
-      total: (p.track_pool ?? []).length,
-      unique: (unique[p.id] ?? []).length,
-    }));
-  }, [players]);
+  const inLobby = Boolean(room && (room.phase === 'lobby' || room.status === 'lobby'));
+
+  const lobbyState = useMemo(() => {
+    if (!room || (room.phase !== 'lobby' && room.status !== 'lobby')) {
+      return {
+        isLobby: false,
+        poolTarget: 0,
+        barPct: 0,
+        poolLine: '',
+        canStart: false,
+        startHint: '',
+      };
+    }
+    const poolTarget = trackPoolSampleTarget(room.settings.rounds, room.settings.deepCuts);
+    if (!players.length) {
+      return {
+        isLobby: true,
+        poolTarget,
+        barPct: 0,
+        poolLine: 'Waiting for players to join…',
+        canStart: false,
+        startHint: lobbyValidationMessage(room, players) ?? 'Waiting for players to join…',
+      };
+    }
+    const scored = players.map((p) => {
+      const pool = p.track_pool ?? [];
+      const prev = pool.filter((t) => Boolean(t.previewUrl)).length;
+      if (pool.length === 0) return { nick: p.nickname, prev, score: 0 };
+      if (!UI_DEV_SKIP_SPOTIFY && pool.length > STALE_TRACK_POOL_MAX) {
+        return { nick: p.nickname, prev, score: 0 };
+      }
+      if (!UI_DEV_SKIP_SPOTIFY && prev < pool.length) {
+        return { nick: p.nickname, prev, score: (prev / pool.length) * 0.35 };
+      }
+      if (prev === 0) return { nick: p.nickname, prev, score: 0 };
+      return { nick: p.nickname, prev, score: Math.min(1, prev / poolTarget) };
+    });
+    const minScore = Math.min(...scored.map((s) => s.score));
+    const weakest = scored.reduce((a, b) => (b.score < a.score ? b : a));
+    const barPct = Math.round(minScore * 100);
+    const poolLine = `${weakest.nick} · ${weakest.prev} / ~${poolTarget} preview tracks`;
+    const msg = lobbyValidationMessage(room, players);
+    return {
+      isLobby: true,
+      poolTarget,
+      barPct,
+      poolLine,
+      canStart: msg === null,
+      startHint: msg ?? '',
+    };
+  }, [room, players]);
 
   async function clearVotes(roomId: string) {
     await supabase.from('room_players').update({ current_vote_player_id: null }).eq('room_id', roomId);
@@ -339,57 +585,16 @@ export default function RoomScreen() {
 
   async function startGame() {
     if (!room || !isHost) return;
-    const minPlayers = UI_DEV_SKIP_SPOTIFY ? 1 : 2;
-    if (players.length < minPlayers) {
-      setLoadErr(
-        UI_DEV_SKIP_SPOTIFY
-          ? 'Need at least one player in the room.'
-          : 'Need at least two players.'
-      );
-      return;
-    }
-    for (const p of players) {
-      const pool = p.track_pool ?? [];
-      if (pool.length === 0) {
-        setLoadErr(
-          UI_DEV_SKIP_SPOTIFY
-            ? `${p.nickname} needs mock tracks — tap “Load mock tracks”.`
-            : `${p.nickname} has not loaded tracks yet. They should connect Spotify and tap Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}.`
-        );
-        return;
-      }
-      if (UI_DEV_SKIP_SPOTIFY) continue;
-      if (pool.length > STALE_TRACK_POOL_MAX) {
-        setLoadErr(
-          `${p.nickname} still has a large old track list (${pool.length} tracks). They must tap “Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}” on their device once to rebuild a small preview-only pool.`
-        );
-        return;
-      }
-      if (pool.length > 0) {
-        const prev = pool.filter((t) => Boolean(t.previewUrl)).length;
-        if (prev === 0) {
-          setLoadErr(
-            `${p.nickname} has no previewable tracks. They should connect Spotify, tap Load, and on web set the Deezer proxy (see README).`
-          );
-          return;
-        }
-        if (prev < pool.length) {
-          setLoadErr(
-            `${p.nickname} still has songs without previews. They should tap Load again so the pool is preview-only.`
-          );
-          return;
-        }
-      }
-    }
-    const played = new Set<string>();
-    const entries = playableEntries(players, room.settings, played);
-    if (!entries.length) {
-      setLoadErr('No playable tracks after filters. Add more distinct music or turn off Deep cuts.');
+    const msg = lobbyValidationMessage(room, players);
+    if (msg) {
+      setLoadErr(msg);
       return;
     }
     setBusy('Starting…');
     try {
       await clearVotes(room.id);
+      const played = new Set<string>();
+      const entries = playableEntries(players, room.settings, played);
       const choice = pickRandom(entries);
       if (!choice) throw new Error('No track');
       const { error } = await supabase
@@ -466,8 +671,20 @@ export default function RoomScreen() {
   }, [room?.id, room?.phase, room?.reveal_started_at, refreshLocal]);
 
   const insets = useSafeAreaInsets();
-  const { height: winH, width: winW } = useWindowDimensions();
-  const artSize = Math.min(winW - 32, Math.max(120, winH * 0.22));
+
+  if (roomDissolved) {
+    return (
+      <View style={[styles.center, { paddingTop: insets.top }]}>
+        <Text style={styles.dissolvedTitle}>Party ended</Text>
+        <Text style={styles.dissolvedSub}>
+          The room closed because too few players remained, or the host left.
+        </Text>
+        <Pressable style={styles.primary} onPress={() => router.replace('/')}>
+          <Text style={styles.primaryText}>Back to home</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   if (loadErr && !room) {
     return (
@@ -491,6 +708,77 @@ export default function RoomScreen() {
   const correctPlayer = players.find((p) => p.id === room.correct_player_id);
   const inGuess = room.phase === 'guess' && Boolean(room.current_track);
 
+  const guessPlayerCount = players.length;
+  const guessChoicesGridStyle =
+    guessPlayerCount === 1
+      ? styles.choicesGridSingle
+      : guessPlayerCount === 2
+        ? styles.choicesGridTwo
+        : guessPlayerCount === 4
+          ? styles.choicesGridFour
+          : guessPlayerCount === 3
+            ? styles.choicesGridRow
+            : styles.choicesGridMany;
+  const guessChipLayoutStyle =
+    guessPlayerCount <= 1
+      ? styles.choiceGuessLayout1Fill
+      : guessPlayerCount === 2
+        ? styles.choiceGuessLayoutTwo
+        : guessPlayerCount <= 3
+          ? styles.choiceGuessLayoutEqual
+          : guessPlayerCount === 4
+            ? styles.choiceGuessLayoutFour
+            : styles.choiceGuessLayoutMany;
+
+  const renderGuessQuizGrid = () => (
+    <View style={[styles.choicesGrid, guessChoicesGridStyle]}>
+      {players.map((p, index) => {
+        const selected = displayVotePlayerId === p.id;
+        const pal = GUESS_PLAYER_PALETTE[index % GUESS_PLAYER_PALETTE.length]!;
+        const fs = guessDisplayNameFontSize(p.nickname);
+        return (
+          <Pressable
+            key={p.id}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            android_ripple={{ color: 'rgba(255,255,255,0.35)' }}
+            hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+            onPress={() => onVoteChipPress(p.id)}
+            disabled={!me}
+            style={(s) => {
+              const pressed = s.pressed;
+              const hovered = 'hovered' in s && (s as { hovered?: boolean }).hovered === true;
+              return [
+                styles.choiceGuessQuiz,
+                guessChipLayoutStyle,
+                { backgroundColor: pal.bg, borderColor: selected ? '#ffffff' : pal.border },
+                selected ? styles.choiceGuessQuizSelected : { borderWidth: 2 },
+                Platform.OS === 'web' && styles.choiceGuessWeb,
+                !selected && hovered && Platform.OS === 'web' && styles.choiceGuessQuizHover,
+                pressed && styles.choiceGuessQuizPressed,
+                selected && Platform.OS === 'web' && styles.choiceGuessQuizSelectedWebRing,
+              ];
+            }}>
+            <Text
+              style={[
+                styles.choiceTextGuessDisplay,
+                {
+                  color: pal.fg,
+                  fontSize: fs,
+                  lineHeight: guessDisplayNameLineHeight(fs),
+                },
+              ]}
+              numberOfLines={2}
+              adjustsFontSizeToFit
+              minimumFontScale={0.65}>
+              {p.nickname}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
   return (
     <View
       style={[
@@ -510,7 +798,7 @@ export default function RoomScreen() {
           {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
           {busy ? <Text style={styles.busy}>{busy}</Text> : null}
           <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
-            <View style={styles.guessTop}>
+            <View style={styles.guessHalfArt}>
               <TrackPreview
                 uri={room.current_track!.previewUrl}
                 replayToken={`${room.round_number}-${room.current_track!.id}`}
@@ -520,60 +808,44 @@ export default function RoomScreen() {
                   No preview clip — guess from title & artist.
                 </Text>
               ) : null}
-              <Text style={styles.guessCardTitle}>Who owns this track?</Text>
-              {room.current_track!.imageUrl ? (
-                <Image
-                  source={{ uri: room.current_track!.imageUrl }}
-                  style={[styles.artGuess, { width: artSize, height: artSize }]}
-                />
-              ) : null}
-              <Text style={styles.trackTitleGuess} numberOfLines={2}>
-                {room.current_track!.name}
-              </Text>
-              <Text style={styles.mutedGuess} numberOfLines={1}>
-                {room.current_track!.artists}
-              </Text>
-              <Text style={styles.roundMetaGuess}>
-                Round {room.round_number} / {room.settings.rounds}
-              </Text>
-            </View>
-            <View style={styles.guessBottom}>
-              <View style={styles.choicesGrid}>
-                {players.map((p) => {
-                  const selected = displayVotePlayerId === p.id;
-                  return (
-                    <Pressable
-                      key={p.id}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected }}
-                      android_ripple={{ color: 'rgba(30, 215, 96, 0.28)' }}
-                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                      onPress={() => onVoteChipPress(p.id)}
-                      disabled={!me}
-                      style={(s) => {
-                        const pressed = s.pressed;
-                        const hovered =
-                          'hovered' in s && (s as { hovered?: boolean }).hovered === true;
-                        return [
-                          styles.choiceGuess,
-                          Platform.OS === 'web' && styles.choiceGuessWeb,
-                          selected && styles.choiceSelected,
-                          selected && Platform.OS === 'web' && styles.choiceSelectedWebRing,
-                          !selected && hovered && styles.choiceGuessHover,
-                          pressed &&
-                            (selected
-                              ? styles.choiceGuessPressedSelected
-                              : styles.choiceGuessPressed),
-                          players.length > 3 ? styles.choiceGuessNarrow : null,
-                        ];
-                      }}>
-                      <Text style={styles.choiceTextGuess} numberOfLines={1}>
-                        {p.nickname}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+              <View style={styles.guessArtFrame}>
+                {room.current_track!.imageUrl ? (
+                  <Image
+                    source={{ uri: room.current_track!.imageUrl }}
+                    style={styles.artGuessContain}
+                    resizeMode="contain"
+                  />
+                ) : (
+                  <View style={styles.artGuessPlaceholder}>
+                    <Text style={styles.artGuessPlaceholderText}>No cover art</Text>
+                  </View>
+                )}
               </View>
+              <View style={styles.guessTrackMeta}>
+                <Text style={styles.trackTitleGuess} numberOfLines={2}>
+                  {room.current_track!.name}
+                </Text>
+                <Text style={styles.mutedGuess} numberOfLines={1}>
+                  {room.current_track!.artists}
+                </Text>
+                <Text style={styles.roundMetaGuess}>
+                  Round {room.round_number} / {room.settings.rounds}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.guessHalfPlayers}>
+              <Text style={styles.guessCardTitle}>Who owns this track?</Text>
+              {guessPlayerCount <= 2 ? (
+                <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
+              ) : (
+                <ScrollView
+                  style={styles.guessChoicesScroll}
+                  contentContainerStyle={styles.guessChoicesScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}>
+                  {renderGuessQuizGrid()}
+                </ScrollView>
+              )}
               <Text style={styles.voteHint}>
                 Tap a name to vote. Tap the same name again to clear — you can skip this round.
               </Text>
@@ -581,113 +853,141 @@ export default function RoomScreen() {
           </View>
         </View>
       ) : (
-        <ScrollView
-          style={styles.scrollFlex}
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled">
-          <Text style={styles.codeLabel}>Room code</Text>
-          <Text style={styles.code}>{room.code}</Text>
-          {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
-          {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
-          {busy ? <Text style={styles.busy}>{busy}</Text> : null}
-
-          {room.phase === 'lobby' || room.status === 'lobby' ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Lobby</Text>
-          <Text style={styles.muted}>
-            {UI_DEV_SKIP_SPOTIFY
-              ? 'UI dev mode (EXPO_PUBLIC_SKIP_SPOTIFY): no Spotify. Load mock tracks, then start — one player is enough to exercise guess/reveal screens.'
-              : 'Share the code so friends can join. Everyone logs into Spotify and taps Load my playlists on their own phone — each person builds their own small preview-only pool (large old lists stay in the database until they load again).'}
-          </Text>
-          {UI_DEV_SKIP_SPOTIFY ? (
-            <Text style={styles.devBanner}>
-              Remove EXPO_PUBLIC_SKIP_SPOTIFY before real playtests or store builds.
-            </Text>
-          ) : null}
-          {!UI_DEV_SKIP_SPOTIFY && !SPOTIFY_CLIENT_ID ? (
-            <Text style={styles.warn}>Add EXPO_PUBLIC_SPOTIFY_CLIENT_ID to use Spotify.</Text>
-          ) : null}
-          {!UI_DEV_SKIP_SPOTIFY && SPOTIFY_CLIENT_ID && spotifyUsesDynamicRedirect() ? (
-            <>
-              <Text style={styles.redirectHint}>
-                Add this exact Redirect URI in Spotify Dashboard → Settings:{'\n'}
-                <Text style={styles.redirectMono}>{spotifyRedirectUri()}</Text>
-              </Text>
-              {typeof window !== 'undefined' && window.location?.hostname === 'localhost' ? (
-                <Text style={styles.warn}>
-                  Open this app at 127.0.0.1 (same port), not localhost — otherwise the Spotify
-                  popup cannot complete sign-in.
-                </Text>
-              ) : null}
-            </>
-          ) : !UI_DEV_SKIP_SPOTIFY && SPOTIFY_CLIENT_ID ? (
-            <Text style={styles.mutedSmall}>Spotify redirect: spotbattle://spotify-auth</Text>
-          ) : null}
-          {UI_DEV_SKIP_SPOTIFY ? (
-            <Pressable style={styles.mockTracksBtn} onPress={() => void loadMockTracksForUi()}>
-              <Text style={styles.mockTracksBtnText}>Load mock tracks (no Spotify)</Text>
-            </Pressable>
-          ) : (
-            <>
-              <Pressable
-                style={styles.secondary}
-                onPress={() => promptAsync()}
-                disabled={!authRequest}>
-                <Text style={styles.secondaryText}>Log in with Spotify</Text>
-              </Pressable>
-              <Pressable style={styles.secondary} onPress={() => void loadMyTracks()}>
-                <Text style={styles.secondaryText}>
-                  Load my {room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'} (previews only)
-                </Text>
-              </Pressable>
-            </>
-          )}
-          <Pressable style={styles.secondary} onPress={() => void toggleReady()}>
-            <Text style={styles.secondaryText}>{me?.ready ? 'Not ready' : 'Ready'}</Text>
-          </Pressable>
-
-          <Text style={styles.subTitle}>Players</Text>
-          {players.map((p) => (
-            <View key={p.id} style={styles.row}>
-              <Text style={styles.rowText}>
-                {p.nickname}
-                {p.user_id === room.host_user_id ? ' (host)' : ''}
-                {p.spotify_display_name ? ` · ${p.spotify_display_name}` : ''}
-              </Text>
-              <Text style={styles.mutedSmall}>
-                {(() => {
-                  const pool = p.track_pool ?? [];
-                  const n = pool.length;
-                  const prev = pool.filter((t) => t.previewUrl).length;
-                  if (n === 0) return '0 tracks';
-                  return `${n} track${n === 1 ? '' : 's'} · ${prev} with preview audio`;
-                })()}
-              </Text>
+        <View style={styles.nonGuessRoot}>
+          <ScrollView
+            style={styles.scrollFlex}
+            contentContainerStyle={[
+              styles.scroll,
+              inLobby ? { paddingBottom: insets.bottom + 148 } : undefined,
+            ]}
+            keyboardShouldPersistTaps="handled">
+            <View style={styles.roomHero}>
+              <Text style={styles.roomHeroKicker}>Room</Text>
+              <Text style={styles.roomHeroCode}>{room.code}</Text>
             </View>
-          ))}
 
-          <Text style={styles.subTitle}>Pool preview (Deep cuts counts)</Text>
-          {poolStats.map((s) => (
-            <Text key={s.id} style={styles.mutedSmall}>
-              {s.nick}: {s.total} loaded · {s.unique} unique
-            </Text>
-          ))}
+            {loadErr ? (
+              <View style={styles.bannerErr}>
+                <Text style={styles.bannerErrText}>{loadErr}</Text>
+              </View>
+            ) : null}
+            {busy ? (
+              <View style={styles.busyRow}>
+                <ActivityIndicator color={theme.accent} />
+                <Text style={styles.busyLabel}>Working…</Text>
+              </View>
+            ) : null}
+            {trackNotice ? <Text style={styles.trackNoticeSpaced}>{trackNotice}</Text> : null}
 
-          {isHost ? (
-            <Pressable style={styles.primary} onPress={() => void startGame()}>
-              <Text style={styles.primaryText}>Start game</Text>
-            </Pressable>
-          ) : (
-            <Text style={styles.muted}>Waiting for host to start…</Text>
-          )}
-        </View>
-      ) : null}
+            {inLobby ? (
+              <View style={styles.lobbyBody}>
+                <Text style={styles.sectionHeading}>Players</Text>
+                <View style={styles.playerList}>
+                  {players.map((p) => {
+                    const pool = p.track_pool ?? [];
+                    const previewCount = pool.filter((t) => Boolean(t.previewUrl)).length;
+                    const hostSeat = p.user_id === room.host_user_id;
+                    return (
+                      <View key={p.id} style={styles.playerCard}>
+                        <View
+                          style={[
+                            styles.playerAvatar,
+                            { backgroundColor: avatarBackground(p.id) },
+                          ]}>
+                          <Text style={styles.playerAvatarText}>{playerInitials(p.nickname)}</Text>
+                        </View>
+                        <View style={styles.playerCardMain}>
+                          <View style={styles.playerNameRow}>
+                            <Text style={styles.playerName} numberOfLines={1}>
+                              {p.nickname}
+                            </Text>
+                            {hostSeat ? (
+                              <View style={styles.hostBadge}>
+                                <Text style={styles.hostBadgeText}>Host</Text>
+                              </View>
+                            ) : null}
+                          </View>
+                          {p.spotify_display_name ? (
+                            <Text style={styles.playerSpotifyName} numberOfLines={1}>
+                              {p.spotify_display_name}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <View style={styles.trackCountBadge}>
+                          <Text style={styles.trackCountBadgeValue}>{previewCount}</Text>
+                          <Text style={styles.trackCountBadgeLabel}>tracks</Text>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
 
-      {room.phase === 'reveal' && room.current_track ? (
-        <View style={styles.card}>
+                <View style={styles.poolCard}>
+                  <Text style={styles.sectionHeading}>Song pool</Text>
+                  <Text style={styles.poolSub}>{lobbyState.poolLine}</Text>
+                  <View style={styles.progressTrack}>
+                    <View
+                      style={[styles.progressFill, { width: `${Math.min(100, lobbyState.barPct)}%` }]}
+                    />
+                  </View>
+                  <Text style={styles.poolHint}>
+                    Strength is based on the smallest preview library in the room.
+                  </Text>
+                </View>
+
+                {UI_DEV_SKIP_SPOTIFY && me && (me.track_pool?.length ?? 0) === 0 ? (
+                  <Pressable
+                    style={styles.linkAction}
+                    onPress={() => void loadMockTracksForUi()}
+                    disabled={Boolean(busy)}>
+                    <Text style={styles.linkActionText}>Add sample tracks</Text>
+                  </Pressable>
+                ) : null}
+
+                {!UI_DEV_SKIP_SPOTIFY ? (
+                  <View style={styles.lobbySpotifyBlock}>
+                    {!spotifyReady ? (
+                      <Pressable
+                        style={[
+                          styles.lobbyGhostBtnFull,
+                          (!authRequest || !SPOTIFY_CLIENT_ID) && styles.lobbyGhostBtnDim,
+                        ]}
+                        onPress={() => promptAsync()}
+                        disabled={!authRequest || !SPOTIFY_CLIENT_ID}>
+                        <Text style={styles.lobbyGhostBtnText}>Connect Spotify</Text>
+                      </Pressable>
+                    ) : (
+                      <Text style={styles.spotifyConnectedNote}>
+                        Spotify is linked on this device. Your library will refresh automatically when
+                        everyone agrees to play again.
+                      </Text>
+                    )}
+                    <Pressable
+                      style={styles.lobbyGhostBtnFull}
+                      onPress={() => void loadMyTracks()}
+                      disabled={Boolean(busy)}>
+                      <Text style={styles.lobbyGhostBtnText}>
+                        Reload {room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                <Pressable style={styles.lobbyLeaveLink} onPress={() => void leaveParty()}>
+                  <Text style={styles.lobbyLeaveLinkText}>Leave room</Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            {room.phase === 'reveal' && room.current_track ? (
+        <View style={[styles.card, styles.cardSpaced]}>
           <Text style={styles.cardTitle}>Answer</Text>
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.answer}>Owner: {correctPlayer?.nickname ?? 'Unknown'}</Text>
+          {(() => {
+            const src = trackSourceLabelForReveal(room.settings.songSource, room.current_track);
+            return src ? <Text style={styles.revealSource}>From: {src}</Text> : null;
+          })()}
           <Text style={styles.muted}>+100 for each correct guess.</Text>
           {revealSecondsLeft !== null ? (
             <Text style={styles.revealCountdown}>Next round in {revealSecondsLeft}s…</Text>
@@ -696,22 +996,117 @@ export default function RoomScreen() {
       ) : null}
 
       {(room.phase === 'ended' || room.status === 'finished') && (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Final scores</Text>
+        <View style={[styles.card, styles.cardSpaced]}>
+          <Text style={styles.cardTitle}>Game over</Text>
+          <Text style={styles.rematchExplainer}>
+            Play again? Everyone must choose Play again. If you leave and fewer than two players
+            remain, the room closes for everyone.
+          </Text>
           {[...players]
             .sort((a, b) => b.score - a.score)
             .map((p, i) => (
-              <Text key={p.id} style={styles.scoreRow}>
-                {i + 1}. {p.nickname} — {p.score} pts
-              </Text>
+              <View key={p.id} style={styles.scoreRowWithVote}>
+                <Text style={styles.scoreRow}>
+                  {i + 1}. {p.nickname} — {p.score} pts
+                </Text>
+                <Text style={styles.rematchBadge}>
+                  {p.rematch_choice === 'yes'
+                    ? 'Play again'
+                    : p.rematch_choice === 'no'
+                      ? 'Done'
+                      : 'Waiting'}
+                </Text>
+              </View>
             ))}
+          {me ? (
+            <View style={styles.rematchActions}>
+              <Pressable
+                style={[
+                  styles.rematchPrimary,
+                  me.rematch_choice === 'yes' && styles.rematchPrimaryOn,
+                  busy && styles.rematchBtnDisabled,
+                ]}
+                disabled={Boolean(busy)}
+                onPress={() => void setRematchVote('yes')}>
+                <Text
+                  style={[
+                    styles.rematchPrimaryText,
+                    me.rematch_choice === 'yes' && styles.rematchPrimaryTextOn,
+                  ]}>
+                  Play again
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.rematchSecondary,
+                  me.rematch_choice === 'no' && styles.rematchSecondaryOn,
+                  busy && styles.rematchBtnDisabled,
+                ]}
+                disabled={Boolean(busy)}
+                onPress={() => void setRematchVote('no')}>
+                <Text style={styles.rematchSecondaryText}>Not this time</Text>
+              </Pressable>
+              <Pressable
+                style={styles.rematchLeave}
+                disabled={Boolean(busy)}
+                onPress={() => void leaveParty()}>
+                <Text style={styles.rematchLeaveText}>Leave party</Text>
+              </Pressable>
+            </View>
+          ) : null}
+          <Text style={styles.rematchHint}>
+            {players.filter((p) => p.rematch_choice === 'yes').length} / {players.length} voted play
+            again
+          </Text>
           <Pressable style={styles.secondary} onPress={() => router.replace('/')}>
             <Text style={styles.secondaryText}>Home</Text>
           </Pressable>
         </View>
       )}
-        </ScrollView>
+          </ScrollView>
+
+          {inLobby ? (
+            <View
+              style={[
+                styles.lobbyStickyFooter,
+                {
+                  paddingBottom: Math.max(insets.bottom, 18),
+                  paddingTop: 16,
+                },
+              ]}>
+              {isHost ? (
+                <View style={styles.lobbyFooterInner}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !lobbyState.canStart || Boolean(busy) }}
+                    style={[
+                      styles.startGameCta,
+                      (!lobbyState.canStart || busy) && styles.startGameCtaDisabled,
+                    ]}
+                    onPress={() => void startGame()}
+                    disabled={!lobbyState.canStart || Boolean(busy)}>
+                    <Text
+                      style={[
+                        styles.startGameCtaText,
+                        (!lobbyState.canStart || busy) && styles.startGameCtaTextDisabled,
+                      ]}>
+                      Start game
+                    </Text>
+                  </Pressable>
+                  {!lobbyState.canStart && lobbyState.startHint ? (
+                    <Text style={styles.startGameHint}>{lobbyState.startHint}</Text>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={styles.waitHostFooter}>Waiting for host to start…</Text>
+              )}
+            </View>
+          ) : null}
+        </View>
       )}
+      {confettiVisible && confettiBurstKey ? (
+        <ConfettiCelebration key={confettiBurstKey} onComplete={onConfettiComplete} />
+      ) : null}
     </View>
   );
 }
@@ -727,11 +1122,58 @@ const styles = StyleSheet.create({
   },
   codeCompact: { fontSize: 22, fontWeight: '900', color: theme.text, letterSpacing: 3 },
   timerHeader: { fontSize: 22, fontWeight: '900', color: theme.accent },
-  guessFill: { flex: 1, minHeight: 0, justifyContent: 'space-between' },
-  guessTop: { flexShrink: 1, alignItems: 'center', width: '100%', gap: 4 },
-  guessBottom: { width: '100%', gap: 8, flexShrink: 0, paddingTop: 4 },
-  guessCardTitle: { fontSize: 16, fontWeight: '800', color: theme.text, marginTop: 2 },
-  artGuess: { borderRadius: 12, marginTop: 2 },
+  guessFill: { flex: 1, minHeight: 0, flexDirection: 'column' },
+  /** ~50% viewport: art + track meta; picture scales with `contain` inside `guessArtFrame`. */
+  guessHalfArt: {
+    flex: 1,
+    minHeight: 0,
+    width: '100%',
+    alignItems: 'center',
+    gap: 4,
+  },
+  guessArtFrame: {
+    flex: 1,
+    minHeight: 0,
+    width: '100%',
+    maxWidth: '100%',
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: theme.surface2,
+  },
+  artGuessContain: { width: '100%', height: '100%' },
+  artGuessPlaceholder: {
+    flex: 1,
+    minHeight: 120,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  artGuessPlaceholderText: { color: theme.textMuted, fontSize: 14, fontWeight: '600' },
+  guessTrackMeta: { width: '100%', alignItems: 'center', gap: 2, paddingBottom: 4 },
+  /** ~50% viewport: question + name chips. */
+  guessHalfPlayers: {
+    flex: 1,
+    minHeight: 0,
+    width: '100%',
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.border,
+    gap: 6,
+  },
+  guessChoicesFill: { flex: 1, minHeight: 0, width: '100%' },
+  guessChoicesScroll: { flex: 1, minHeight: 0, width: '100%' },
+  guessChoicesScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  guessCardTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: theme.text,
+    marginTop: 0,
+    flexShrink: 0,
+  },
   trackTitleGuess: {
     fontSize: 17,
     fontWeight: '800',
@@ -753,72 +1195,303 @@ const styles = StyleSheet.create({
     color: theme.textMuted,
     fontSize: 12,
     textAlign: 'center',
-    marginTop: 12,
     paddingHorizontal: 8,
     lineHeight: 17,
+    flexShrink: 0,
   },
   choicesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 8,
     width: '100%',
+    gap: 10,
   },
-  choiceGuess: {
-    flexGrow: 1,
-    flexBasis: '45%',
-    minWidth: '42%',
-    maxWidth: '100%',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    backgroundColor: theme.surface2,
-    borderWidth: 2,
-    borderColor: theme.border,
+  /** 1 player: fill lower area, one full-width tile. */
+  choicesGridSingle: {
+    flex: 1,
+    flexDirection: 'column',
+    minHeight: 0,
+    alignItems: 'stretch',
+  },
+  /** 2 players: side-by-side, equal blocks filling available height. */
+  choicesGridTwo: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'nowrap',
+    alignItems: 'stretch',
+    minHeight: 120,
+    gap: 10,
+  },
+  /** 3 players: one row, equal widths. */
+  choicesGridRow: {
+    flexWrap: 'nowrap',
+    justifyContent: 'space-between',
+    alignItems: 'stretch',
+  },
+  /** 4 players: 2×2 grid. */
+  choicesGridFour: {
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignItems: 'stretch',
+  },
+  /** 5+ players: wrap with ~2 columns. */
+  choicesGridMany: {
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  choiceGuessQuiz: {
+    paddingVertical: 20,
+    paddingHorizontal: 14,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  choiceGuessQuizSelected: {
+    borderWidth: 4,
+    borderColor: '#ffffff',
+  },
+  choiceGuessQuizHover: { opacity: 0.93 },
+  choiceGuessQuizPressed: { opacity: 0.88 },
+  choiceGuessQuizSelectedWebRing: {
+    boxShadow: '0 0 0 2px rgba(255,255,255,0.95), 0 10px 28px rgba(0,0,0,0.45)',
+  },
+  choiceGuessLayout1Fill: {
+    width: '100%',
+    flex: 1,
+    minHeight: 120,
+    alignSelf: 'stretch',
+  },
+  choiceGuessLayoutTwo: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 120,
+    alignSelf: 'stretch',
+  },
+  choiceGuessLayoutEqual: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    minHeight: 96,
+  },
+  choiceGuessLayoutFour: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '48%',
+    minWidth: 0,
+    maxWidth: '50%',
+    minHeight: 88,
+  },
+  choiceGuessLayoutMany: {
+    flexGrow: 1,
+    flexBasis: '45%',
+    minWidth: '40%',
+    maxWidth: '48%',
+    minHeight: 72,
   },
   /** Web: smooth hover / press (color only — no scale, so border and fill stay aligned). */
   choiceGuessWeb: {
     cursor: 'pointer',
     userSelect: 'none',
     transitionDuration: '140ms',
-    transitionProperty: 'background-color, border-color, box-shadow',
+    transitionProperty: 'opacity, border-color, box-shadow',
     transitionTimingFunction: 'ease-out',
   },
-  choiceGuessHover: {
-    backgroundColor: '#1c2030',
-    borderColor: '#3d4358',
-  },
-  choiceGuessPressed: {
-    backgroundColor: '#151821',
-    borderColor: '#2f3445',
-  },
-  choiceGuessPressedSelected: {
-    backgroundColor: 'rgba(22, 156, 70, 0.22)',
-    borderColor: '#12a650',
-  },
-  choiceGuessNarrow: {
-    flexBasis: '30%',
-    minWidth: '28%',
-    paddingVertical: 9,
+  choiceTextGuessDisplay: {
+    fontWeight: '900',
+    textAlign: 'center',
+    letterSpacing: -0.4,
+    width: '100%',
     paddingHorizontal: 6,
   },
-  choiceTextGuess: { color: theme.text, fontSize: 15, fontWeight: '700', textAlign: 'center' },
-  secondaryGuess: {
+  center: { flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  nonGuessRoot: { flex: 1, minHeight: 0, backgroundColor: theme.bg },
+  scroll: {
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 40,
+    backgroundColor: theme.bg,
+  },
+  scrollFlex: { flex: 1 },
+  roomHero: { marginBottom: 28 },
+  roomHeroKicker: {
+    color: theme.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  roomHeroCode: {
+    color: theme.text,
+    fontSize: 44,
+    fontWeight: '900',
+    letterSpacing: 10,
+    lineHeight: 52,
+  },
+  bannerErr: {
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: theme.border,
-    paddingVertical: 11,
-    borderRadius: 12,
+    borderColor: 'rgba(255, 92, 92, 0.35)',
+    backgroundColor: 'rgba(255, 92, 92, 0.08)',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginBottom: 20,
+  },
+  bannerErrText: { color: theme.danger, fontSize: 14, lineHeight: 20, fontWeight: '600' },
+  busyRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: theme.surface2,
+    gap: 12,
+    marginBottom: 16,
+  },
+  busyLabel: { color: theme.textMuted, fontSize: 14, fontWeight: '600' },
+  trackNoticeSpaced: {
+    color: theme.textMuted,
+    fontSize: 13,
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  lobbyBody: { gap: 8, marginBottom: 8 },
+  sectionHeading: {
+    color: theme.textMuted,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    marginBottom: 14,
     marginTop: 4,
   },
-  center: { flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  scroll: { padding: 20, paddingBottom: 40, backgroundColor: theme.bg },
-  scrollFlex: { flex: 1 },
+  playerList: { gap: 14 },
+  playerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.border,
+    paddingVertical: 18,
+    paddingHorizontal: 18,
+    gap: 16,
+  },
+  playerAvatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playerAvatarText: { color: theme.text, fontSize: 17, fontWeight: '800' },
+  playerCardMain: { flex: 1, minWidth: 0 },
+  playerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  playerName: { color: theme.text, fontSize: 17, fontWeight: '800', flexShrink: 1 },
+  hostBadge: {
+    backgroundColor: theme.surface2,
+    borderRadius: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  hostBadgeText: { color: theme.accent, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  playerSpotifyName: { color: theme.textMuted, fontSize: 13, marginTop: 4 },
+  trackCountBadge: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.surface2,
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    minWidth: 64,
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  trackCountBadgeValue: { color: theme.text, fontSize: 18, fontWeight: '900' },
+  trackCountBadgeLabel: { color: theme.textMuted, fontSize: 10, fontWeight: '700', marginTop: 2 },
+  poolCard: {
+    marginTop: 28,
+    backgroundColor: theme.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: 22,
+    gap: 12,
+  },
+  poolSub: { color: theme.text, fontSize: 15, fontWeight: '700' },
+  poolHint: { color: theme.textMuted, fontSize: 13, lineHeight: 19 },
+  progressTrack: {
+    height: 12,
+    borderRadius: 8,
+    backgroundColor: theme.surface2,
+    overflow: 'hidden',
+    marginTop: 4,
+  },
+  progressFill: {
+    height: 12,
+    borderRadius: 8,
+    backgroundColor: theme.accent,
+  },
+  linkAction: { alignSelf: 'center', marginTop: 20, paddingVertical: 8, paddingHorizontal: 12 },
+  linkActionText: { color: theme.accent, fontSize: 15, fontWeight: '800' },
+  lobbySpotifyBlock: { gap: 12, marginTop: 24 },
+  lobbyGhostBtnFull: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: theme.border,
+    backgroundColor: theme.surface,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lobbyGhostBtnDim: { opacity: 0.45 },
+  lobbyGhostBtnText: { color: theme.text, fontSize: 14, fontWeight: '700' },
+  spotifyConnectedNote: {
+    color: theme.textMuted,
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+  },
+  lobbyLeaveLink: { alignSelf: 'center', marginTop: 22, paddingVertical: 10 },
+  lobbyLeaveLinkText: { color: theme.textMuted, fontSize: 14, fontWeight: '700' },
+  cardSpaced: { marginTop: 28 },
+  lobbyStickyFooter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 4,
+    paddingHorizontal: 24,
+    backgroundColor: theme.bg,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.border,
+  },
+  lobbyFooterInner: { gap: 10 },
+  startGameCta: {
+    borderRadius: 16,
+    backgroundColor: theme.accent,
+    paddingVertical: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 56,
+  },
+  startGameCtaDisabled: { opacity: 0.48 },
+  startGameCtaText: { color: '#04210f', fontSize: 17, fontWeight: '900' },
+  startGameCtaTextDisabled: { opacity: 0.55 },
+  startGameHint: {
+    color: theme.textMuted,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+  },
+  waitHostFooter: {
+    color: theme.textMuted,
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingVertical: 18,
+  },
   codeLabel: { color: theme.textMuted, fontSize: 13 },
-  code: { fontSize: 40, fontWeight: '900', color: theme.text, letterSpacing: 4, marginBottom: 12 },
   err: { color: theme.danger, marginBottom: 8 },
   busy: { color: theme.textMuted, marginBottom: 8 },
   card: {
@@ -831,10 +1504,6 @@ const styles = StyleSheet.create({
   },
   cardTitle: { fontSize: 20, fontWeight: '800', color: theme.text },
   muted: { color: theme.textMuted, fontSize: 14, lineHeight: 20 },
-  warn: { color: theme.danger, fontSize: 13 },
-  subTitle: { marginTop: 8, fontSize: 15, fontWeight: '700', color: theme.text },
-  row: { paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: theme.border },
-  rowText: { color: theme.text, fontSize: 15 },
   mutedSmall: { color: theme.textMuted, fontSize: 13 },
   previewNote: {
     color: theme.accent,
@@ -872,59 +1541,70 @@ const styles = StyleSheet.create({
   trackTitle: { fontSize: 22, fontWeight: '800', color: theme.text, marginTop: 8 },
   timer: { fontSize: 28, fontWeight: '900', color: theme.accent },
   roundMeta: { color: theme.textMuted },
-  choices: { gap: 8, marginTop: 8 },
-  choice: {
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    backgroundColor: theme.surface2,
-    borderWidth: 1,
-    borderColor: theme.border,
-  },
-  choiceSelected: {
-    borderColor: theme.accent,
-    backgroundColor: 'rgba(30, 215, 96, 0.1)',
-  },
-  /** Web-only outer glow so the ring moves with the same layer as the fill (no “sliding” border). */
-  choiceSelectedWebRing: {
-    boxShadow: '0 0 0 1px rgba(30, 215, 96, 0.4)',
-  },
-  choiceText: { color: theme.text, fontSize: 16, fontWeight: '700' },
   answer: { fontSize: 18, fontWeight: '700', color: theme.accent, marginTop: 6 },
   revealCountdown: { fontSize: 16, fontWeight: '800', color: theme.text, marginTop: 8 },
-  scoreRow: { color: theme.text, fontSize: 16, paddingVertical: 4 },
-  redirectHint: {
-    color: theme.textMuted,
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  redirectMono: {
-    fontFamily: 'SpaceMono',
-    color: theme.accent,
-    fontSize: 11,
-  },
-  devBanner: {
-    backgroundColor: '#3d2e00',
-    borderWidth: 1,
-    borderColor: '#8a6a00',
-    borderRadius: 10,
-    padding: 10,
-    color: '#ffd966',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  mockTracksBtn: {
-    borderWidth: 1,
-    borderColor: theme.accent,
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    backgroundColor: '#0d2818',
-  },
-  mockTracksBtnText: {
-    color: theme.accent,
+  revealSource: {
+    fontSize: 15,
     fontWeight: '700',
-    fontSize: 16,
+    color: theme.accent,
+    marginTop: 6,
+    textAlign: 'center',
+  },
+  scoreRow: { color: theme.text, fontSize: 16, paddingVertical: 4, flex: 1 },
+  scoreRowWithVote: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.border,
+  },
+  rematchExplainer: {
+    color: theme.textMuted,
+    fontSize: 14,
+    lineHeight: 21,
+    marginBottom: 12,
+  },
+  rematchBadge: { fontSize: 12, fontWeight: '700', color: theme.accent, marginLeft: 12 },
+  rematchActions: { gap: 12, marginTop: 18 },
+  rematchPrimary: {
+    borderRadius: 14,
+    backgroundColor: theme.surface2,
+    paddingVertical: 16,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: theme.border,
+  },
+  rematchPrimaryOn: { backgroundColor: theme.accent, borderColor: theme.accent },
+  rematchPrimaryText: { color: theme.text, fontSize: 16, fontWeight: '900' },
+  rematchPrimaryTextOn: { color: '#04210f' },
+  rematchSecondary: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: theme.border,
+    paddingVertical: 14,
+    alignItems: 'center',
+    backgroundColor: theme.surface2,
+  },
+  rematchSecondaryOn: { borderColor: theme.accent },
+  rematchSecondaryText: { color: theme.text, fontSize: 15, fontWeight: '800' },
+  rematchLeave: { alignItems: 'center', paddingVertical: 8 },
+  rematchLeaveText: { color: theme.textMuted, fontSize: 14, fontWeight: '700' },
+  rematchHint: {
+    color: theme.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 14,
+    marginBottom: 8,
+  },
+  rematchBtnDisabled: { opacity: 0.45 },
+  dissolvedTitle: { fontSize: 22, fontWeight: '900', color: theme.text, marginBottom: 10 },
+  dissolvedSub: {
+    color: theme.textMuted,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 24,
+    paddingHorizontal: 12,
   },
 });

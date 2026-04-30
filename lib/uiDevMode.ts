@@ -21,6 +21,7 @@ export function getMockTrackPoolForUi(): GameTrack[] {
       artists: 'Player A',
       imageUrl: null,
       previewUrl: DEMO_PREVIEW,
+      sourcePlaylistName: 'Sandbox playlist',
     },
     {
       id: 'ui-dev-2',
@@ -28,6 +29,7 @@ export function getMockTrackPoolForUi(): GameTrack[] {
       artists: 'Player B',
       imageUrl: null,
       previewUrl: DEMO_PREVIEW,
+      sourcePlaylistName: 'Sandbox playlist',
     },
     {
       id: 'ui-dev-3',
@@ -35,6 +37,7 @@ export function getMockTrackPoolForUi(): GameTrack[] {
       artists: 'Player A',
       imageUrl: null,
       previewUrl: DEMO_PREVIEW,
+      sourcePlaylistName: 'Sandbox playlist',
     },
   ];
 }

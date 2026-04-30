@@ -1,4 +1,4 @@
-import type { GameTrack, RoomPlayerRow, RoomSettings, RoomRow } from '@/lib/types';
+import type { GameTrack, RematchChoice, RoomPlayerRow, RoomSettings, RoomRow } from '@/lib/types';
 import { combinedPlayablePool } from '@/lib/uniquePool';
 
 export type PlayableEntry = { track: GameTrack; ownerPlayerId: string };
@@ -92,5 +92,12 @@ export function normalizePlayer(row: Record<string, unknown>): RoomPlayerRow {
     current_vote_player_id: row.current_vote_player_id
       ? String(row.current_vote_player_id)
       : null,
+    rematch_choice: parseRematchChoice(row.rematch_choice),
   };
+}
+
+function parseRematchChoice(raw: unknown): RematchChoice {
+  const s = typeof raw === 'string' ? raw : '';
+  if (s === 'pending' || s === 'yes' || s === 'no' || s === 'idle') return s;
+  return 'idle';
 }

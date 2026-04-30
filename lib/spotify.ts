@@ -196,6 +196,17 @@ export async function clearSpotifySession() {
   await sessionStoreDelete(EXPIRES_KEY);
 }
 
+/** True when Spotify is already linked (valid access or refresh token on device). */
+export async function hasSpotifySession(clientId: string): Promise<boolean> {
+  const id = clientId.trim();
+  if (!id) return false;
+  try {
+    return Boolean(await getValidAccessToken(id));
+  } catch {
+    return false;
+  }
+}
+
 export async function getValidAccessToken(clientId: string): Promise<string | null> {
   const id = clientId.trim();
   if (!id) return null;
@@ -374,7 +385,12 @@ type SpotifyPlaylistTracksPage = {
   next: string | null;
 };
 
-function toGameTrack(t: SpotifyTrackItem['track']): GameTrack | null {
+type TrackSourcePlaylist = { playlistId: string; playlistName: string };
+
+function toGameTrack(
+  t: SpotifyTrackItem['track'],
+  sourcePlaylist?: TrackSourcePlaylist
+): GameTrack | null {
   if (!t?.id) return null;
   const isrc = t.external_ids?.isrc?.trim() || null;
   return {
@@ -384,8 +400,17 @@ function toGameTrack(t: SpotifyTrackItem['track']): GameTrack | null {
     imageUrl: t.album?.images?.[0]?.url ?? null,
     previewUrl: t.preview_url ?? null,
     ...(isrc ? { isrc } : {}),
+    ...(sourcePlaylist
+      ? {
+          sourcePlaylistId: sourcePlaylist.playlistId,
+          sourcePlaylistName: sourcePlaylist.playlistName,
+        }
+      : {}),
   };
 }
+
+/** Label stored on tracks from `/me/tracks` (shown on reveal). */
+export const LIKED_SONGS_SOURCE_NAME = 'Liked songs';
 
 export type FetchTracksSampleOptions = {
   /** When set, stop after enough candidates, shuffle, and return at most this many tracks. */
@@ -394,17 +419,17 @@ export type FetchTracksSampleOptions = {
 
 export async function fetchTracksFromPlaylists(
   token: string,
-  playlistIds: string[],
+  playlists: { id: string; name: string }[],
   options?: FetchTracksSampleOptions
 ): Promise<GameTrack[]> {
   const k = options?.sampleTarget;
   const byId = new Map<string, GameTrack>();
-  const pids = [...playlistIds];
-  shuffleInPlace(pids);
-  const capped = pids.slice(0, MAX_PLAYLIST_IDS);
+  const plist = [...playlists];
+  shuffleInPlace(plist);
+  const capped = plist.slice(0, MAX_PLAYLIST_IDS);
   let scannedItems = 0;
 
-  outer: for (const pid of capped) {
+  outer: for (const { id: pid, name: pname } of capped) {
     let url: string | null = withMarket(
       `/playlists/${encodeURIComponent(pid)}/tracks?limit=100&fields=${encodeURIComponent('next,items(track(id,name,preview_url,album(images),artists(name),external_ids(isrc)))')}`
     );
@@ -414,9 +439,11 @@ export async function fetchTracksFromPlaylists(
       const page = (await spotifyFetch(url, token)) as SpotifyPlaylistTracksPage;
       const items = page.items ?? [];
       for (const it of items) {
-        const gt = toGameTrack(it.track);
+        const gt = toGameTrack(it.track, { playlistId: pid, playlistName: pname });
         if (gt) {
-          byId.set(gt.id, gt);
+          if (!byId.has(gt.id)) {
+            byId.set(gt.id, gt);
+          }
           scannedItems += 1;
         }
         if (k) {
@@ -463,7 +490,11 @@ export async function fetchSavedTracks(
     for (const it of items) {
       const gt = toGameTrack(it.track);
       if (gt) {
-        byId.set(gt.id, gt);
+        byId.set(gt.id, {
+          ...gt,
+          sourcePlaylistId: null,
+          sourcePlaylistName: LIKED_SONGS_SOURCE_NAME,
+        });
         scannedItems += 1;
       }
       if (k) {

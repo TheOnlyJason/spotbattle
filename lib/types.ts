@@ -16,6 +16,9 @@ export type GameTrack = {
   previewUrl: string | null;
   /** International Standard Recording Code from Spotify, used to match Deezer preview MP3s. */
   isrc?: string | null;
+  /** When sampled from the owner's Spotify playlists (shown on reveal). */
+  sourcePlaylistId?: string | null;
+  sourcePlaylistName?: string | null;
 };
 
 export type RoomRow = {
@@ -36,6 +39,9 @@ export type RoomRow = {
   updated_at: string;
 };
 
+/** Set when a game ends; `idle` during play / lobby after rematch. */
+export type RematchChoice = 'idle' | 'pending' | 'yes' | 'no';
+
 export type RoomPlayerRow = {
   id: string;
   room_id: string;
@@ -46,4 +52,5 @@ export type RoomPlayerRow = {
   score: number;
   ready: boolean;
   current_vote_player_id: string | null;
+  rematch_choice: RematchChoice;
 };
