@@ -13,6 +13,7 @@ import {
 import { TrackPreview } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
+import { enrichTracksWithDeezerPreviews } from '@/lib/deezerPreview';
 import {
   normalizePlayer,
   normalizeRoom,
@@ -65,6 +66,7 @@ export default function RoomScreen() {
   const [players, setPlayers] = useState<RoomPlayerRow[]>([]);
   const [myUserId, setMyUserId] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [trackNotice, setTrackNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
 
@@ -174,6 +176,8 @@ export default function RoomScreen() {
       setBusy('Set EXPO_PUBLIC_SPOTIFY_CLIENT_ID in .env');
       return;
     }
+    setLoadErr(null);
+    setTrackNotice(null);
     setBusy('Fetching Spotify…');
     try {
       const token = await getValidAccessToken(SPOTIFY_CLIENT_ID);
@@ -184,17 +188,43 @@ export default function RoomScreen() {
       }
       let tracks: GameTrack[] = [];
       if (room.settings.songSource === 'liked') {
+        setBusy('Loading liked songs…');
         tracks = await fetchSavedTracks(token);
       } else {
+        setBusy('Loading your playlists…');
         const lists = await fetchAllPlaylistIds(token);
         const ids = lists.map((l) => l.id);
+        setBusy('Loading tracks from playlists…');
         tracks = await fetchTracksFromPlaylists(token, ids);
       }
+      setBusy('Looking up preview audio (Deezer by ISRC)…');
+      tracks = await enrichTracksWithDeezerPreviews(tracks);
       const { error } = await supabase.from('room_players').update({ track_pool: tracks }).eq('id', me.id);
       if (error) throw error;
       await refreshLocal();
+      if (tracks.length === 0) {
+        setLoadErr(
+          'No tracks were returned from Spotify (empty library or API issue). Try Liked songs or check your connection.'
+        );
+      } else {
+        const withPreview = tracks.filter((t) => t.previewUrl).length;
+        if (withPreview === 0) {
+          setTrackNotice(
+            `${tracks.length} tracks saved; still no preview URLs (Spotify omits them and Deezer had no ISRC match for these tracks). Play from title & artist only, or try a smaller playlist set.`
+          );
+        } else if (withPreview < tracks.length) {
+          setTrackNotice(
+            `${tracks.length} tracks saved — ${withPreview} with preview audio (Spotify and/or Deezer), ${tracks.length - withPreview} without.`
+          );
+        }
+      }
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Fetch failed');
+      const msg = e instanceof Error ? e.message : 'Fetch failed';
+      const hint =
+        msg.includes('Failed to fetch') || msg.includes('Network request failed')
+          ? ' Check your network. On web, ad blockers or strict privacy settings can block Spotify’s API.'
+          : '';
+      setLoadErr(`${msg}${hint}`);
     } finally {
       setBusy(null);
     }
@@ -406,6 +436,7 @@ export default function RoomScreen() {
       <Text style={styles.codeLabel}>Room code</Text>
       <Text style={styles.code}>{room.code}</Text>
       {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
+      {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
       {busy ? <Text style={styles.busy}>{busy}</Text> : null}
 
       {room.phase === 'lobby' || room.status === 'lobby' ? (
@@ -416,10 +447,18 @@ export default function RoomScreen() {
             <Text style={styles.warn}>Add EXPO_PUBLIC_SPOTIFY_CLIENT_ID to use Spotify.</Text>
           ) : null}
           {SPOTIFY_CLIENT_ID && spotifyUsesDynamicRedirect() ? (
-            <Text style={styles.redirectHint}>
-              Add this exact Redirect URI in Spotify Dashboard → Settings:{'\n'}
-              <Text style={styles.redirectMono}>{spotifyRedirectUri()}</Text>
-            </Text>
+            <>
+              <Text style={styles.redirectHint}>
+                Add this exact Redirect URI in Spotify Dashboard → Settings:{'\n'}
+                <Text style={styles.redirectMono}>{spotifyRedirectUri()}</Text>
+              </Text>
+              {typeof window !== 'undefined' && window.location?.hostname === 'localhost' ? (
+                <Text style={styles.warn}>
+                  Open this app at 127.0.0.1 (same port), not localhost — otherwise the Spotify
+                  popup cannot complete sign-in.
+                </Text>
+              ) : null}
+            </>
           ) : SPOTIFY_CLIENT_ID ? (
             <Text style={styles.mutedSmall}>Spotify redirect: spotbattle://spotify-auth</Text>
           ) : null}
@@ -447,7 +486,13 @@ export default function RoomScreen() {
                 {p.spotify_display_name ? ` · ${p.spotify_display_name}` : ''}
               </Text>
               <Text style={styles.mutedSmall}>
-                {p.track_pool?.length ?? 0} tracks with preview
+                {(() => {
+                  const pool = p.track_pool ?? [];
+                  const n = pool.length;
+                  const prev = pool.filter((t) => t.previewUrl).length;
+                  if (n === 0) return '0 tracks';
+                  return `${n} track${n === 1 ? '' : 's'} · ${prev} with preview audio`;
+                })()}
               </Text>
             </View>
           ))}
@@ -475,6 +520,11 @@ export default function RoomScreen() {
             uri={room.current_track.previewUrl}
             replayToken={`${room.round_number}-${room.current_track.id}`}
           />
+          {!room.current_track.previewUrl ? (
+            <Text style={styles.previewNote}>
+              No preview clip from Spotify — guess from title and artist only.
+            </Text>
+          ) : null}
           <Text style={styles.cardTitle}>Who owns this track?</Text>
           {secondsLeft !== null ? (
             <Text style={styles.timer}>{secondsLeft}s</Text>
@@ -569,6 +619,19 @@ const styles = StyleSheet.create({
   row: { paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: theme.border },
   rowText: { color: theme.text, fontSize: 15 },
   mutedSmall: { color: theme.textMuted, fontSize: 13 },
+  previewNote: {
+    color: theme.accent,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  trackNotice: {
+    color: theme.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 4,
+  },
   primary: {
     marginTop: 8,
     backgroundColor: theme.accent,

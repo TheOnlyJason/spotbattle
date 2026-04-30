@@ -1,8 +1,9 @@
 import 'react-native-url-polyfill/auto';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
+
+import { browserLocalStorageAsync } from '@/lib/browserStorage';
 
 const url =
   process.env.EXPO_PUBLIC_SUPABASE_URL ??
@@ -30,14 +31,16 @@ function createMemoryAuthStorage() {
 }
 
 /**
- * AsyncStorage's web implementation uses `window`. That throws during `expo export`
- * (static web) and other Node-side evaluation. Use memory storage only in that case.
+ * Web: use `localStorage` only — do not pass RN AsyncStorage (Metro can pull the native
+ * implementation and throw "Native module is null" in the browser / SSR).
+ * Native: AsyncStorage via require so it is not evaluated on web bundles.
  */
 function getAuthStorage() {
-  if (Platform.OS === 'web' && typeof window === 'undefined') {
-    return createMemoryAuthStorage();
+  if (Platform.OS === 'web') {
+    return typeof window === 'undefined' ? createMemoryAuthStorage() : browserLocalStorageAsync;
   }
-  return AsyncStorage;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('@react-native-async-storage/async-storage').default;
 }
 
 export const supabase = createClient(url, anon, {

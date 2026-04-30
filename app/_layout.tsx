@@ -42,6 +42,7 @@ export default function RootLayout() {
         <Stack.Screen name="create" options={{ title: 'Create game' }} />
         <Stack.Screen name="join" options={{ title: 'Join game' }} />
         <Stack.Screen name="room/[code]" options={{ title: 'Room', headerBackTitle: 'Back' }} />
+        <Stack.Screen name="spotify-auth" options={{ title: 'Spotify' }} />
       </Stack>
     </ThemeProvider>
   );

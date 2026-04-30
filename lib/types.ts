@@ -12,7 +12,10 @@ export type GameTrack = {
   name: string;
   artists: string;
   imageUrl: string | null;
-  previewUrl: string;
+  /** Spotify often returns null; Deezer may fill this via `isrc` (see `enrichTracksWithDeezerPreviews`). */
+  previewUrl: string | null;
+  /** International Standard Recording Code from Spotify, used to match Deezer preview MP3s. */
+  isrc?: string | null;
 };
 
 export type RoomRow = {
