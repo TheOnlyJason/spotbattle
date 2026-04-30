@@ -6,7 +6,9 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "build": "expo export --platform web",
+    "export:web": "expo export --platform web"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -40,5 +42,8 @@
     "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2"
   },
-  "private": true
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }

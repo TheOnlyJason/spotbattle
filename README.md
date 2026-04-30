@@ -39,6 +39,17 @@ Copy `.env.example` to `.env` in the project root and fill in:
 
 Restart Expo after changing env vars (`npx expo start -c`).
 
+## Deploy web (Vercel)
+
+The repo includes `vercel.json`: **Other / no framework**, `npm run build` → `expo export --platform web`, publish **`dist`**, and SPA rewrites so routes like `/room/ABCD` work after refresh. `.nvmrc` pins **Node 20** (Expo’s Metro needs Node 20+).
+
+1. Commit and push these files, then redeploy (or `npx vercel --prod`).
+2. In the Vercel project → **Settings → Environment Variables**, set `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_SPOTIFY_CLIENT_ID` for **Production** (and **Preview** if you use preview URLs).
+3. Confirm the latest deployment **Build** logs show a successful export and that **Output** is `dist` (you should see `index.html` in the build output).
+4. **Spotify**: add your live redirect URI (usually `https://<your-domain>/spotify-auth`) — copy the exact string from the in-app lobby if unsure.
+
+If you see **404: NOT_FOUND** on the Vercel URL, the usual cause is an **empty or wrong output directory** (build never ran `expo export`, or Vercel used a different preset). Fix: ensure this `vercel.json` is deployed, **Node 20.x** in project settings, env vars set, then **Redeploy**.
+
 ## Run locally
 
 ```bash
