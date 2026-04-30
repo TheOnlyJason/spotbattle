@@ -49,6 +49,9 @@ export function trackPoolFetchSampleTarget(poolTarget: number): number {
   return Math.min(350, Math.max(120, poolTarget * 6));
 }
 
+/** Pools larger than this are treated as pre–preview-only full imports. */
+export const STALE_TRACK_POOL_MAX = 220;
+
 export function normalizeRoom(row: Record<string, unknown>): RoomRow {
   const settings = (row.settings ?? {}) as RoomSettings;
   return {

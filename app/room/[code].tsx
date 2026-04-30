@@ -8,8 +8,10 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { TrackPreview } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
@@ -21,6 +23,7 @@ import {
   pickRandom,
   playableEntries,
   shuffleInPlace,
+  STALE_TRACK_POOL_MAX,
   trackPoolFetchSampleTarget,
   trackPoolSampleTarget,
 } from '@/lib/gameLogic';
@@ -53,7 +56,6 @@ async function applyScoringAndReveal(roomId: string) {
   const { data: plist } = await supabase.from('room_players').select('*').eq('room_id', roomId);
   for (const row of plist ?? []) {
     const p = normalizePlayer(row as Record<string, unknown>);
-    if (p.id === correct) continue;
     if (p.current_vote_player_id === correct) {
       await supabase.from('room_players').update({ score: p.score + 100 }).eq('id', p.id);
     }
@@ -175,7 +177,16 @@ export default function RoomScreen() {
   }, [response, authRequest, code, refreshLocal]);
 
   async function loadMyTracks() {
-    if (!me?.id || !room) return;
+    if (!room) {
+      setLoadErr('Room not loaded yet.');
+      return;
+    }
+    if (!me?.id) {
+      setLoadErr(
+        'Your seat in this room is not ready yet. Wait a few seconds, reopen the room, or leave and rejoin with the code — then tap Load again.'
+      );
+      return;
+    }
     if (!SPOTIFY_CLIENT_ID) {
       setBusy('Set EXPO_PUBLIC_SPOTIFY_CLIENT_ID in .env');
       return;
@@ -237,15 +248,16 @@ export default function RoomScreen() {
   }
 
   async function toggleReady() {
-    if (!me?.id) return;
+    if (!me?.id) {
+      setLoadErr('Your seat in this room is not ready yet. Wait or rejoin, then try Ready again.');
+      return;
+    }
     const { error } = await supabase.from('room_players').update({ ready: !me.ready }).eq('id', me.id);
     if (error) setLoadErr(error.message);
   }
 
   async function castVote(targetPlayerId: string) {
     if (!me?.id || !room || room.phase !== 'guess') return;
-    // Song owner already knows it's theirs — they don't cast a guess.
-    if (me.id === room.correct_player_id) return;
     const { error } = await supabase
       .from('room_players')
       .update({ current_vote_player_id: targetPlayerId })
@@ -274,6 +286,36 @@ export default function RoomScreen() {
     if (players.length < 2) {
       setLoadErr('Need at least two players.');
       return;
+    }
+    for (const p of players) {
+      const pool = p.track_pool ?? [];
+      if (pool.length === 0) {
+        setLoadErr(
+          `${p.nickname} has not loaded tracks yet. They should connect Spotify and tap Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}.`
+        );
+        return;
+      }
+      if (pool.length > STALE_TRACK_POOL_MAX) {
+        setLoadErr(
+          `${p.nickname} still has a large old track list (${pool.length} tracks). They must tap “Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}” on their device once to rebuild a small preview-only pool.`
+        );
+        return;
+      }
+      if (pool.length > 0) {
+        const prev = pool.filter((t) => Boolean(t.previewUrl)).length;
+        if (prev === 0) {
+          setLoadErr(
+            `${p.nickname} has no previewable tracks. They should connect Spotify, tap Load, and on web set the Deezer proxy (see README).`
+          );
+          return;
+        }
+        if (prev < pool.length) {
+          setLoadErr(
+            `${p.nickname} still has songs without previews. They should tap Load again so the pool is preview-only.`
+          );
+          return;
+        }
+      }
     }
     const played = new Set<string>();
     const entries = playableEntries(players, room.settings, played);
@@ -437,19 +479,105 @@ export default function RoomScreen() {
   }
 
   const correctPlayer = players.find((p) => p.id === room.correct_player_id);
+  const insets = useSafeAreaInsets();
+  const { height: winH, width: winW } = useWindowDimensions();
+  const inGuess = room.phase === 'guess' && Boolean(room.current_track);
+  const artSize = Math.min(winW - 32, Math.max(120, winH * 0.22));
 
   return (
-    <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-      <Text style={styles.codeLabel}>Room code</Text>
-      <Text style={styles.code}>{room.code}</Text>
-      {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
-      {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
-      {busy ? <Text style={styles.busy}>{busy}</Text> : null}
+    <View
+      style={[
+        styles.screenRoot,
+        { flex: 1, backgroundColor: theme.bg, paddingTop: insets.top },
+      ]}>
+      {inGuess ? (
+        <View style={styles.guessScreen}>
+          <View style={styles.guessHeaderRow}>
+            <View>
+              <Text style={styles.codeLabel}>Room</Text>
+              <Text style={styles.codeCompact}>{room.code}</Text>
+            </View>
+            {secondsLeft !== null ? <Text style={styles.timerHeader}>{secondsLeft}s</Text> : null}
+          </View>
+          {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
+          {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
+          {busy ? <Text style={styles.busy}>{busy}</Text> : null}
+          <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
+            <View style={styles.guessTop}>
+              <TrackPreview
+                uri={room.current_track!.previewUrl}
+                replayToken={`${room.round_number}-${room.current_track!.id}`}
+              />
+              {!room.current_track!.previewUrl ? (
+                <Text style={styles.previewNoteGuess}>
+                  No preview clip — guess from title & artist.
+                </Text>
+              ) : null}
+              <Text style={styles.guessCardTitle}>Who owns this track?</Text>
+              {room.current_track!.imageUrl ? (
+                <Image
+                  source={{ uri: room.current_track!.imageUrl }}
+                  style={[styles.artGuess, { width: artSize, height: artSize }]}
+                />
+              ) : null}
+              <Text style={styles.trackTitleGuess} numberOfLines={2}>
+                {room.current_track!.name}
+              </Text>
+              <Text style={styles.mutedGuess} numberOfLines={1}>
+                {room.current_track!.artists}
+              </Text>
+              <Text style={styles.roundMetaGuess}>
+                Round {room.round_number} / {room.settings.rounds}
+              </Text>
+            </View>
+            <View style={styles.guessBottom}>
+              <View style={styles.choicesGrid}>
+                {players.map((p) => {
+                  const selected = me?.current_vote_player_id === p.id;
+                  return (
+                    <Pressable
+                      key={p.id}
+                      onPress={() => void castVote(p.id)}
+                      disabled={!me}
+                      style={[
+                        styles.choiceGuess,
+                        selected && styles.choiceSelected,
+                        players.length > 3 ? styles.choiceGuessNarrow : null,
+                      ]}>
+                      <Text style={styles.choiceTextGuess} numberOfLines={1}>
+                        {p.nickname}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {isHost ? (
+                <Pressable style={styles.secondaryGuess} onPress={() => void revealRound()}>
+                  <Text style={styles.secondaryText}>Reveal now</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        </View>
+      ) : (
+        <ScrollView
+          style={styles.scrollFlex}
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled">
+          <Text style={styles.codeLabel}>Room code</Text>
+          <Text style={styles.code}>{room.code}</Text>
+          {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
+          {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
+          {busy ? <Text style={styles.busy}>{busy}</Text> : null}
 
-      {room.phase === 'lobby' || room.status === 'lobby' ? (
+          {room.phase === 'lobby' || room.status === 'lobby' ? (
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Lobby</Text>
-          <Text style={styles.muted}>Share the code so friends can join, then connect Spotify and load tracks.</Text>
+          <Text style={styles.muted}>
+            Share the code so friends can join. Everyone logs into Spotify and taps Load my playlists on their own
+            phone — each person builds their own small preview-only pool (large old lists stay in the database until
+            they load again).
+          </Text>
           {!SPOTIFY_CLIENT_ID ? (
             <Text style={styles.warn}>Add EXPO_PUBLIC_SPOTIFY_CLIENT_ID to use Spotify.</Text>
           ) : null}
@@ -521,61 +649,12 @@ export default function RoomScreen() {
         </View>
       ) : null}
 
-      {room.phase === 'guess' && room.current_track ? (
-        <View style={styles.card}>
-          <TrackPreview
-            uri={room.current_track.previewUrl}
-            replayToken={`${room.round_number}-${room.current_track.id}`}
-          />
-          {!room.current_track.previewUrl ? (
-            <Text style={styles.previewNote}>
-              No preview clip from Spotify — guess from title and artist only.
-            </Text>
-          ) : null}
-          <Text style={styles.cardTitle}>Who owns this track?</Text>
-          {secondsLeft !== null ? (
-            <Text style={styles.timer}>{secondsLeft}s</Text>
-          ) : null}
-          {room.current_track.imageUrl ? (
-            <Image source={{ uri: room.current_track.imageUrl }} style={styles.art} />
-          ) : null}
-          <Text style={styles.trackTitle}>{room.current_track.name}</Text>
-          <Text style={styles.muted}>{room.current_track.artists}</Text>
-          <Text style={styles.roundMeta}>
-            Round {room.round_number} / {room.settings.rounds}
-          </Text>
-          {me?.id === room.correct_player_id ? (
-            <Text style={styles.muted}>You played this track — wait while others guess.</Text>
-          ) : (
-            <View style={styles.choices}>
-              {players.map((p) => {
-                const selected = me?.current_vote_player_id === p.id;
-                return (
-                  <Pressable
-                    key={p.id}
-                    onPress={() => void castVote(p.id)}
-                    disabled={!me}
-                    style={[styles.choice, selected && styles.choiceSelected]}>
-                    <Text style={styles.choiceText}>{p.nickname}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          )}
-          {isHost ? (
-            <Pressable style={styles.secondary} onPress={() => void revealRound()}>
-              <Text style={styles.secondaryText}>Reveal now</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      ) : null}
-
       {room.phase === 'reveal' && room.current_track ? (
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Answer</Text>
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.answer}>Owner: {correctPlayer?.nickname ?? 'Unknown'}</Text>
-          <Text style={styles.muted}>+100 for each correct guess (song owner excluded).</Text>
+          <Text style={styles.muted}>+100 for each correct guess.</Text>
           {isHost ? (
             <Pressable style={styles.primary} onPress={() => void nextRound()}>
               <Text style={styles.primaryText}>Next round</Text>
@@ -599,13 +678,84 @@ export default function RoomScreen() {
           </Pressable>
         </View>
       )}
-    </ScrollView>
+        </ScrollView>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screenRoot: { minHeight: 0 },
+  guessScreen: { flex: 1, minHeight: 0, paddingHorizontal: 16 },
+  guessHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  codeCompact: { fontSize: 22, fontWeight: '900', color: theme.text, letterSpacing: 3 },
+  timerHeader: { fontSize: 22, fontWeight: '900', color: theme.accent },
+  guessFill: { flex: 1, minHeight: 0, justifyContent: 'space-between' },
+  guessTop: { flexShrink: 1, alignItems: 'center', width: '100%', gap: 4 },
+  guessBottom: { width: '100%', gap: 8, flexShrink: 0, paddingTop: 4 },
+  guessCardTitle: { fontSize: 16, fontWeight: '800', color: theme.text, marginTop: 2 },
+  artGuess: { borderRadius: 12, marginTop: 2 },
+  trackTitleGuess: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: theme.text,
+    textAlign: 'center',
+    width: '100%',
+    paddingHorizontal: 4,
+  },
+  mutedGuess: { color: theme.textMuted, fontSize: 13, textAlign: 'center', width: '100%' },
+  roundMetaGuess: { color: theme.textMuted, fontSize: 12 },
+  previewNoteGuess: {
+    color: theme.accent,
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+  choicesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    width: '100%',
+  },
+  choiceGuess: {
+    flexGrow: 1,
+    flexBasis: '45%',
+    minWidth: '42%',
+    maxWidth: '100%',
+    paddingVertical: 11,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: theme.surface2,
+    borderWidth: 1,
+    borderColor: theme.border,
+    alignItems: 'center',
+  },
+  choiceGuessNarrow: {
+    flexBasis: '30%',
+    minWidth: '28%',
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+  },
+  choiceTextGuess: { color: theme.text, fontSize: 15, fontWeight: '700', textAlign: 'center' },
+  secondaryGuess: {
+    borderWidth: 1,
+    borderColor: theme.border,
+    paddingVertical: 11,
+    borderRadius: 12,
+    alignItems: 'center',
+    backgroundColor: theme.surface2,
+    marginTop: 4,
+  },
   center: { flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
   scroll: { padding: 20, paddingBottom: 40, backgroundColor: theme.bg },
+  scrollFlex: { flex: 1 },
   codeLabel: { color: theme.textMuted, fontSize: 13 },
   code: { fontSize: 40, fontWeight: '900', color: theme.text, letterSpacing: 4, marginBottom: 12 },
   err: { color: theme.danger, marginBottom: 8 },
