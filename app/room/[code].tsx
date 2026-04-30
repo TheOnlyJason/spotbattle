@@ -44,24 +44,8 @@ import type { GameTrack, RoomPlayerRow, RoomRow } from '@/lib/types';
 import { uniqueTracksPerPlayer } from '@/lib/uniquePool';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
-
-async function applyScoringAndReveal(roomId: string) {
-  const { data: cur } = await supabase
-    .from('rooms')
-    .select('phase, correct_player_id')
-    .eq('id', roomId)
-    .single();
-  if (!cur?.correct_player_id || cur.phase !== 'guess') return;
-  const correct = cur.correct_player_id as string;
-  const { data: plist } = await supabase.from('room_players').select('*').eq('room_id', roomId);
-  for (const row of plist ?? []) {
-    const p = normalizePlayer(row as Record<string, unknown>);
-    if (p.current_vote_player_id === correct) {
-      await supabase.from('room_players').update({ score: p.score + 100 }).eq('id', p.id);
-    }
-  }
-  await supabase.from('rooms').update({ phase: 'reveal' }).eq('id', roomId);
-}
+/** Must match `advance_from_reveal` dwell in Supabase migration. */
+const REVEAL_DWELL_MS = 3000;
 
 export default function RoomScreen() {
   const { code: rawCode } = useLocalSearchParams<{ code: string }>();
@@ -338,6 +322,7 @@ export default function RoomScreen() {
           current_track: choice.track,
           correct_player_id: choice.ownerPlayerId,
           round_started_at: new Date().toISOString(),
+          reveal_started_at: null,
         })
         .eq('id', room.id);
       if (error) throw error;
@@ -349,80 +334,8 @@ export default function RoomScreen() {
     }
   }
 
-  async function revealRound() {
-    setBusy('Scoring…');
-    try {
-      const { data: u } = await supabase.auth.getUser();
-      const uid = u.user?.id;
-      if (!uid) return;
-      const { data: cur } = await supabase.from('rooms').select('*').eq('code', code).maybeSingle();
-      if (!cur || cur.host_user_id !== uid || cur.phase !== 'guess') return;
-      await applyScoringAndReveal(cur.id as string);
-      await refreshLocal();
-    } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Reveal failed');
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function nextRound() {
-    if (!room || !isHost) return;
-    const trackId = room.current_track?.id;
-    const played = [...(room.played_track_ids ?? []), ...(trackId ? [trackId] : [])];
-    const nextNum = room.round_number + 1;
-    if (nextNum > room.settings.rounds) {
-      await supabase
-        .from('rooms')
-        .update({
-          phase: 'ended',
-          status: 'finished',
-          played_track_ids: played,
-          current_track: null,
-          correct_player_id: null,
-          round_started_at: null,
-        })
-        .eq('id', room.id);
-      await refreshLocal();
-      return;
-    }
-    await clearVotes(room.id);
-    const { data: plist } = await supabase.from('room_players').select('*').eq('room_id', room.id);
-    const freshPlayers = (plist ?? []).map((row) => normalizePlayer(row as Record<string, unknown>));
-    const entries = playableEntries(freshPlayers, room.settings, new Set(played));
-    if (!entries.length) {
-      await supabase
-        .from('rooms')
-        .update({
-          phase: 'ended',
-          status: 'finished',
-          round_number: nextNum,
-          played_track_ids: played,
-          current_track: null,
-          correct_player_id: null,
-        })
-        .eq('id', room.id);
-      await refreshLocal();
-      return;
-    }
-    const choice = pickRandom(entries);
-    if (!choice) return;
-    await supabase
-      .from('rooms')
-      .update({
-        phase: 'guess',
-        round_number: nextNum,
-        played_track_ids: played,
-        current_track: choice.track,
-        correct_player_id: choice.ownerPlayerId,
-        round_started_at: new Date().toISOString(),
-      })
-      .eq('id', room.id);
-    await refreshLocal();
-  }
-
   useEffect(() => {
-    if (room?.phase !== 'guess') return;
+    if (room?.phase !== 'guess' && room?.phase !== 'reveal') return;
     const t = setInterval(() => setClock(Date.now()), 1000);
     return () => clearInterval(t);
   }, [room?.phase]);
@@ -434,8 +347,14 @@ export default function RoomScreen() {
     return Math.max(0, Math.ceil((end - clock) / 1000));
   }, [room?.round_started_at, room?.phase, room?.settings.secondsPerRound, clock]);
 
+  const revealSecondsLeft = useMemo(() => {
+    if (!room?.reveal_started_at || room.phase !== 'reveal') return null;
+    const end = new Date(room.reveal_started_at).getTime() + REVEAL_DWELL_MS;
+    return Math.max(0, Math.ceil((end - clock) / 1000));
+  }, [room?.reveal_started_at, room?.phase, clock]);
+
   useEffect(() => {
-    if (!isHost || !room || room.phase !== 'guess' || !room.round_started_at) return;
+    if (!room || room.phase !== 'guess' || !room.round_started_at) return;
     const roomId = room.id;
     const sec = room.settings.secondsPerRound;
     const end = new Date(room.round_started_at).getTime() + sec * 1000;
@@ -443,21 +362,28 @@ export default function RoomScreen() {
       if (Date.now() < end) return;
       clearInterval(t);
       void (async () => {
-        const { data: u } = await supabase.auth.getUser();
-        const uid = u.user?.id;
-        if (!uid) return;
-        const { data: cur } = await supabase
-          .from('rooms')
-          .select('host_user_id, phase, id')
-          .eq('id', roomId)
-          .single();
-        if (!cur || cur.host_user_id !== uid || cur.phase !== 'guess') return;
-        await applyScoringAndReveal(roomId);
+        const { error } = await supabase.rpc('finalize_guess_phase', { p_room_id: roomId });
+        if (error) setLoadErr(error.message);
         await refreshLocal();
       })();
     }, 500);
     return () => clearInterval(t);
-  }, [isHost, room?.id, room?.phase, room?.round_started_at, room?.settings.secondsPerRound, refreshLocal]);
+  }, [room?.id, room?.phase, room?.round_started_at, room?.settings.secondsPerRound, refreshLocal]);
+
+  useEffect(() => {
+    if (!room || room.phase !== 'reveal' || !room.reveal_started_at) return;
+    const roomId = room.id;
+    const fireAt = new Date(room.reveal_started_at).getTime() + REVEAL_DWELL_MS;
+    const delay = Math.max(0, fireAt - Date.now());
+    const tid = setTimeout(() => {
+      void (async () => {
+        const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
+        if (error) setLoadErr(error.message);
+        await refreshLocal();
+      })();
+    }, delay);
+    return () => clearTimeout(tid);
+  }, [room?.id, room?.phase, room?.reveal_started_at, refreshLocal]);
 
   const insets = useSafeAreaInsets();
   const { height: winH, width: winW } = useWindowDimensions();
@@ -552,11 +478,6 @@ export default function RoomScreen() {
                   );
                 })}
               </View>
-              {isHost ? (
-                <Pressable style={styles.secondaryGuess} onPress={() => void revealRound()}>
-                  <Text style={styles.secondaryText}>Reveal now</Text>
-                </Pressable>
-              ) : null}
             </View>
           </View>
         </View>
@@ -656,10 +577,8 @@ export default function RoomScreen() {
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.answer}>Owner: {correctPlayer?.nickname ?? 'Unknown'}</Text>
           <Text style={styles.muted}>+100 for each correct guess.</Text>
-          {isHost ? (
-            <Pressable style={styles.primary} onPress={() => void nextRound()}>
-              <Text style={styles.primaryText}>Next round</Text>
-            </Pressable>
+          {revealSecondsLeft !== null ? (
+            <Text style={styles.revealCountdown}>Next round in {revealSecondsLeft}s…</Text>
           ) : null}
         </View>
       ) : null}
@@ -824,6 +743,7 @@ const styles = StyleSheet.create({
   choiceSelected: { borderColor: theme.accent },
   choiceText: { color: theme.text, fontSize: 16, fontWeight: '700' },
   answer: { fontSize: 18, fontWeight: '700', color: theme.accent, marginTop: 6 },
+  revealCountdown: { fontSize: 16, fontWeight: '800', color: theme.text, marginTop: 8 },
   scoreRow: { color: theme.text, fontSize: 16, paddingVertical: 4 },
   redirectHint: {
     color: theme.textMuted,

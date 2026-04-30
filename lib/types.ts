@@ -30,6 +30,8 @@ export type RoomRow = {
   current_track: GameTrack | null;
   correct_player_id: string | null;
   round_started_at: string | null;
+  /** Server sets when entering reveal; used for auto-advance after dwell. */
+  reveal_started_at: string | null;
   created_at: string;
   updated_at: string;
 };

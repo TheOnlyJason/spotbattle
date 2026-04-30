@@ -73,6 +73,7 @@ export function normalizeRoom(row: Record<string, unknown>): RoomRow {
     current_track: (row.current_track as GameTrack | null) ?? null,
     correct_player_id: row.correct_player_id ? String(row.correct_player_id) : null,
     round_started_at: row.round_started_at ? String(row.round_started_at) : null,
+    reveal_started_at: row.reveal_started_at ? String(row.reveal_started_at) : null,
     created_at: String(row.created_at ?? ''),
     updated_at: String(row.updated_at ?? ''),
   };
