@@ -1,4 +1,4 @@
-import type { GameTrack, RematchChoice, RoomPlayerRow, RoomSettings, RoomRow } from '@/lib/types';
+import type { GameTrack, RematchChoice, RoomPlayerRow, RoomRow, RoomSettings } from '@/lib/types';
 import { combinedPlayablePool } from '@/lib/uniquePool';
 
 export type PlayableEntry = { track: GameTrack; ownerPlayerId: string };
@@ -86,6 +86,7 @@ export function normalizePlayer(row: Record<string, unknown>): RoomPlayerRow {
     user_id: String(row.user_id),
     nickname: String(row.nickname ?? ''),
     spotify_display_name: row.spotify_display_name ? String(row.spotify_display_name) : null,
+    spotify_image_url: row.spotify_image_url ? String(row.spotify_image_url) : null,
     track_pool: Array.isArray(row.track_pool) ? (row.track_pool as GameTrack[]) : [],
     score: Number(row.score ?? 0),
     ready: Boolean(row.ready),

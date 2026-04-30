@@ -36,6 +36,7 @@ import {
   getValidAccessToken,
   hasSpotifySession,
   LIKED_SONGS_SOURCE_NAME,
+  pickSpotifyProfileImageUrl,
   saveSpotifySession,
   spotifyRedirectUri,
   useSpotifyAuthRequest,
@@ -97,6 +98,31 @@ function avatarBackground(seed: string): string {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
   return AVATAR_BACKGROUNDS[h % AVATAR_BACKGROUNDS.length]!;
+}
+
+function PlayerAvatarBubble({ player, size }: { player: RoomPlayerRow; size: 'lobby' | 'score' }) {
+  const dim = size === 'lobby' ? 52 : 36;
+  const radius = dim / 2;
+  return (
+    <View
+      style={[
+        styles.playerAvatar,
+        size === 'score' && { width: dim, height: dim, borderRadius: radius },
+        { backgroundColor: avatarBackground(player.id), overflow: 'hidden' },
+      ]}>
+      {player.spotify_image_url ? (
+        <Image
+          source={{ uri: player.spotify_image_url }}
+          style={{ width: dim, height: dim }}
+          resizeMode="cover"
+        />
+      ) : (
+        <Text style={[styles.playerAvatarText, size === 'score' && { fontSize: 13 }]}>
+          {playerInitials(player.nickname)}
+        </Text>
+      )}
+    </View>
+  );
 }
 
 /** `null` = ready to start; otherwise user-facing reason (also used under the Start button). */
@@ -288,6 +314,7 @@ export default function RoomScreen() {
         const token = await getValidAccessToken(SPOTIFY_CLIENT_ID);
         if (!token) return;
         const profile = await fetchSpotifyProfile(token);
+        const profileImg = pickSpotifyProfileImageUrl(profile.images);
         const { data: userData } = await supabase.auth.getUser();
         const uid = userData.user?.id;
         if (!uid) return;
@@ -295,7 +322,10 @@ export default function RoomScreen() {
         if (!rrow?.id) return;
         await supabase
           .from('room_players')
-          .update({ spotify_display_name: profile.display_name ?? profile.id })
+          .update({
+            spotify_display_name: profile.display_name ?? profile.id,
+            spotify_image_url: profileImg,
+          })
           .eq('room_id', rrow.id)
           .eq('user_id', uid);
         await refreshLocal();
@@ -337,7 +367,7 @@ export default function RoomScreen() {
       const tracks = getMockTrackPoolForUi();
       const { error } = await supabase
         .from('room_players')
-        .update({ track_pool: tracks, spotify_display_name: 'UI mock' })
+        .update({ track_pool: tracks, spotify_display_name: 'UI mock', spotify_image_url: null })
         .eq('id', me.id);
       if (error) throw error;
       await refreshLocal();
@@ -889,13 +919,7 @@ export default function RoomScreen() {
                     const hostSeat = p.user_id === room.host_user_id;
                     return (
                       <View key={p.id} style={styles.playerCard}>
-                        <View
-                          style={[
-                            styles.playerAvatar,
-                            { backgroundColor: avatarBackground(p.id) },
-                          ]}>
-                          <Text style={styles.playerAvatarText}>{playerInitials(p.nickname)}</Text>
-                        </View>
+                        <PlayerAvatarBubble player={p} size="lobby" />
                         <View style={styles.playerCardMain}>
                           <View style={styles.playerNameRow}>
                             <Text style={styles.playerName} numberOfLines={1}>
@@ -1006,9 +1030,12 @@ export default function RoomScreen() {
             .sort((a, b) => b.score - a.score)
             .map((p, i) => (
               <View key={p.id} style={styles.scoreRowWithVote}>
-                <Text style={styles.scoreRow}>
-                  {i + 1}. {p.nickname} — {p.score} pts
-                </Text>
+                <View style={styles.scoreRowLeft}>
+                  <PlayerAvatarBubble player={p} size="score" />
+                  <Text style={styles.scoreRow} numberOfLines={1}>
+                    {i + 1}. {p.nickname} — {p.score} pts
+                  </Text>
+                </View>
                 <Text style={styles.rematchBadge}>
                   {p.rematch_choice === 'yes'
                     ? 'Play again'
@@ -1549,6 +1576,14 @@ const styles = StyleSheet.create({
     color: theme.accent,
     marginTop: 6,
     textAlign: 'center',
+  },
+  scoreRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 8,
   },
   scoreRow: { color: theme.text, fontSize: 16, paddingVertical: 4, flex: 1 },
   scoreRowWithVote: {

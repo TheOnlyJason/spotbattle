@@ -342,7 +342,28 @@ async function spotifyFetch(path: string, token: string, init?: RequestInit) {
   );
 }
 
-export type SpotifyUser = { id: string; display_name: string | null };
+export type SpotifyUser = {
+  id: string;
+  display_name: string | null;
+  images?: { url: string; width?: number | null; height?: number | null }[] | null;
+};
+
+/** Pick largest Spotify profile image, if any (many users have no `images`). */
+export function pickSpotifyProfileImageUrl(
+  images: SpotifyUser['images'] | undefined | null
+): string | null {
+  if (!images?.length) return null;
+  let best = images[0]!;
+  let bestArea = (best.width ?? 0) * (best.height ?? 0);
+  for (const im of images) {
+    const area = (im.width ?? 0) * (im.height ?? 0);
+    if (area >= bestArea) {
+      best = im;
+      bestArea = area;
+    }
+  }
+  return best.url?.trim() ? best.url : null;
+}
 
 export async function fetchSpotifyProfile(token: string): Promise<SpotifyUser> {
   return spotifyFetch('/me', token) as Promise<SpotifyUser>;

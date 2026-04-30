@@ -5,16 +5,22 @@ import { Platform } from 'react-native';
 
 import { browserLocalStorageAsync } from '@/lib/browserStorage';
 
-const url =
+const rawUrl = (
   process.env.EXPO_PUBLIC_SUPABASE_URL ??
   (Constants.expoConfig?.extra as { supabaseUrl?: string } | undefined)?.supabaseUrl ??
-  '';
-const anon =
+  ''
+).trim();
+const rawAnon = (
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
   (Constants.expoConfig?.extra as { supabaseAnonKey?: string } | undefined)?.supabaseAnonKey ??
-  '';
+  ''
+).trim();
 
-export const isSupabaseConfigured = Boolean(url && anon);
+export const isSupabaseConfigured = Boolean(rawUrl && rawAnon);
+
+/** Non-empty fallbacks so `createClient` never throws during static export when env vars are missing (e.g. Vercel preview without secrets). Real requests still require `isSupabaseConfigured`. */
+const url = rawUrl || 'https://placeholder.supabase.co';
+const anon = rawAnon || 'sb-placeholder-anon-key-not-configured';
 
 /** In-memory storage for Node / static web export where `window` is undefined. */
 function createMemoryAuthStorage() {
@@ -39,8 +45,13 @@ function getAuthStorage() {
   if (Platform.OS === 'web') {
     return typeof window === 'undefined' ? createMemoryAuthStorage() : browserLocalStorageAsync;
   }
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('@react-native-async-storage/async-storage').default;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('@react-native-async-storage/async-storage').default;
+  } catch {
+    // Metro / static export can evaluate this path with a non-web Platform; native module is absent in Node.
+    return createMemoryAuthStorage();
+  }
 }
 
 export const supabase = createClient(url, anon, {

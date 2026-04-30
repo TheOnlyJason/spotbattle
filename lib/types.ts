@@ -48,6 +48,8 @@ export type RoomPlayerRow = {
   user_id: string;
   nickname: string;
   spotify_display_name: string | null;
+  /** Spotify profile photo URL from GET /v1/me; null if user has no image or has not connected Spotify. */
+  spotify_image_url: string | null;
   track_pool: GameTrack[];
   score: number;
   ready: boolean;
