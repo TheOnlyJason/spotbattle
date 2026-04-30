@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -41,6 +41,7 @@ import {
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
 import type { GameTrack, RoomPlayerRow, RoomRow } from '@/lib/types';
+import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
 import { uniqueTracksPerPlayer } from '@/lib/uniquePool';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
@@ -59,6 +60,11 @@ export default function RoomScreen() {
   const [trackNotice, setTrackNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
+  /** `undefined` = use server vote; otherwise show this id immediately while saving. */
+  const [optimisticVotePlayerId, setOptimisticVotePlayerId] = useState<string | null | undefined>(
+    undefined
+  );
+  const voteRequestSeq = useRef(0);
 
   const [authRequest, response, promptAsync] = useSpotifyAuthRequest(SPOTIFY_CLIENT_ID);
 
@@ -66,7 +72,15 @@ export default function RoomScreen() {
     () => players.find((p) => p.user_id === myUserId) ?? null,
     [players, myUserId]
   );
+  const displayVotePlayerId =
+    optimisticVotePlayerId !== undefined
+      ? optimisticVotePlayerId
+      : (me?.current_vote_player_id ?? null);
   const isHost = Boolean(room && myUserId && room.host_user_id === myUserId);
+
+  useEffect(() => {
+    setOptimisticVotePlayerId(undefined);
+  }, [room?.phase, room?.round_number]);
 
   const refreshLocal = useCallback(async () => {
     const { data: r } = await supabase.from('rooms').select('*').eq('code', code).maybeSingle();
@@ -126,6 +140,7 @@ export default function RoomScreen() {
   }, [room?.id, refreshLocal]);
 
   useEffect(() => {
+    if (UI_DEV_SKIP_SPOTIFY) return;
     if (response?.type !== 'success' || !authRequest || !SPOTIFY_CLIENT_ID) return;
     const params = response.params as { code?: string };
     const c = params.code;
@@ -160,7 +175,40 @@ export default function RoomScreen() {
     })();
   }, [response, authRequest, code, refreshLocal]);
 
+  async function loadMockTracksForUi() {
+    if (!UI_DEV_SKIP_SPOTIFY) return;
+    if (!room) {
+      setLoadErr('Room not loaded yet.');
+      return;
+    }
+    if (!me?.id) {
+      setLoadErr('Your seat is not ready yet — wait a moment or rejoin the room.');
+      return;
+    }
+    setLoadErr(null);
+    setTrackNotice(null);
+    setBusy('Saving mock tracks…');
+    try {
+      const tracks = getMockTrackPoolForUi();
+      const { error } = await supabase
+        .from('room_players')
+        .update({ track_pool: tracks, spotify_display_name: 'UI mock' })
+        .eq('id', me.id);
+      if (error) throw error;
+      await refreshLocal();
+      setTrackNotice('Mock pool loaded — you can start the game (1+ players in UI dev mode).');
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : 'Mock load failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function loadMyTracks() {
+    if (UI_DEV_SKIP_SPOTIFY) {
+      setLoadErr('UI dev mode is on — use “Load mock tracks” instead of Spotify.');
+      return;
+    }
     if (!room) {
       setLoadErr('Room not loaded yet.');
       return;
@@ -240,13 +288,37 @@ export default function RoomScreen() {
     if (error) setLoadErr(error.message);
   }
 
-  async function castVote(targetPlayerId: string) {
-    if (!me?.id || !room || room.phase !== 'guess') return;
+  async function persistVoteChoice(playerRowId: string, nextVote: string | null) {
     const { error } = await supabase
       .from('room_players')
-      .update({ current_vote_player_id: targetPlayerId })
-      .eq('id', me.id);
-    if (error) setLoadErr(error.message);
+      .update({ current_vote_player_id: nextVote })
+      .eq('id', playerRowId);
+    if (error) throw new Error(error.message);
+    await refreshLocal();
+  }
+
+  function onVoteChipPress(targetPlayerId: string) {
+    if (!me?.id || !room || room.phase !== 'guess') return;
+    const rowId = me.id;
+    const current =
+      optimisticVotePlayerId !== undefined
+        ? optimisticVotePlayerId
+        : (me.current_vote_player_id ?? null);
+    const next = current === targetPlayerId ? null : targetPlayerId;
+    const seq = ++voteRequestSeq.current;
+    setOptimisticVotePlayerId(next);
+    void (async () => {
+      try {
+        await persistVoteChoice(rowId, next);
+      } catch (e) {
+        setLoadErr(e instanceof Error ? e.message : 'Vote failed');
+        await refreshLocal();
+      } finally {
+        if (voteRequestSeq.current === seq) {
+          setOptimisticVotePlayerId(undefined);
+        }
+      }
+    })();
   }
 
   const poolStats = useMemo(() => {
@@ -267,18 +339,26 @@ export default function RoomScreen() {
 
   async function startGame() {
     if (!room || !isHost) return;
-    if (players.length < 2) {
-      setLoadErr('Need at least two players.');
+    const minPlayers = UI_DEV_SKIP_SPOTIFY ? 1 : 2;
+    if (players.length < minPlayers) {
+      setLoadErr(
+        UI_DEV_SKIP_SPOTIFY
+          ? 'Need at least one player in the room.'
+          : 'Need at least two players.'
+      );
       return;
     }
     for (const p of players) {
       const pool = p.track_pool ?? [];
       if (pool.length === 0) {
         setLoadErr(
-          `${p.nickname} has not loaded tracks yet. They should connect Spotify and tap Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}.`
+          UI_DEV_SKIP_SPOTIFY
+            ? `${p.nickname} needs mock tracks — tap “Load mock tracks”.`
+            : `${p.nickname} has not loaded tracks yet. They should connect Spotify and tap Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}.`
         );
         return;
       }
+      if (UI_DEV_SKIP_SPOTIFY) continue;
       if (pool.length > STALE_TRACK_POOL_MAX) {
         setLoadErr(
           `${p.nickname} still has a large old track list (${pool.length} tracks). They must tap “Load my ${room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'}” on their device once to rebuild a small preview-only pool.`
@@ -460,17 +540,33 @@ export default function RoomScreen() {
             <View style={styles.guessBottom}>
               <View style={styles.choicesGrid}>
                 {players.map((p) => {
-                  const selected = me?.current_vote_player_id === p.id;
+                  const selected = displayVotePlayerId === p.id;
                   return (
                     <Pressable
                       key={p.id}
-                      onPress={() => void castVote(p.id)}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      android_ripple={{ color: 'rgba(30, 215, 96, 0.28)' }}
+                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                      onPress={() => onVoteChipPress(p.id)}
                       disabled={!me}
-                      style={[
-                        styles.choiceGuess,
-                        selected && styles.choiceSelected,
-                        players.length > 3 ? styles.choiceGuessNarrow : null,
-                      ]}>
+                      style={(s) => {
+                        const pressed = s.pressed;
+                        const hovered =
+                          'hovered' in s && (s as { hovered?: boolean }).hovered === true;
+                        return [
+                          styles.choiceGuess,
+                          Platform.OS === 'web' && styles.choiceGuessWeb,
+                          selected && styles.choiceSelected,
+                          selected && Platform.OS === 'web' && styles.choiceSelectedWebRing,
+                          !selected && hovered && styles.choiceGuessHover,
+                          pressed &&
+                            (selected
+                              ? styles.choiceGuessPressedSelected
+                              : styles.choiceGuessPressed),
+                          players.length > 3 ? styles.choiceGuessNarrow : null,
+                        ];
+                      }}>
                       <Text style={styles.choiceTextGuess} numberOfLines={1}>
                         {p.nickname}
                       </Text>
@@ -478,6 +574,9 @@ export default function RoomScreen() {
                   );
                 })}
               </View>
+              <Text style={styles.voteHint}>
+                Tap a name to vote. Tap the same name again to clear — you can skip this round.
+              </Text>
             </View>
           </View>
         </View>
@@ -496,14 +595,19 @@ export default function RoomScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Lobby</Text>
           <Text style={styles.muted}>
-            Share the code so friends can join. Everyone logs into Spotify and taps Load my playlists on their own
-            phone — each person builds their own small preview-only pool (large old lists stay in the database until
-            they load again).
+            {UI_DEV_SKIP_SPOTIFY
+              ? 'UI dev mode (EXPO_PUBLIC_SKIP_SPOTIFY): no Spotify. Load mock tracks, then start — one player is enough to exercise guess/reveal screens.'
+              : 'Share the code so friends can join. Everyone logs into Spotify and taps Load my playlists on their own phone — each person builds their own small preview-only pool (large old lists stay in the database until they load again).'}
           </Text>
-          {!SPOTIFY_CLIENT_ID ? (
+          {UI_DEV_SKIP_SPOTIFY ? (
+            <Text style={styles.devBanner}>
+              Remove EXPO_PUBLIC_SKIP_SPOTIFY before real playtests or store builds.
+            </Text>
+          ) : null}
+          {!UI_DEV_SKIP_SPOTIFY && !SPOTIFY_CLIENT_ID ? (
             <Text style={styles.warn}>Add EXPO_PUBLIC_SPOTIFY_CLIENT_ID to use Spotify.</Text>
           ) : null}
-          {SPOTIFY_CLIENT_ID && spotifyUsesDynamicRedirect() ? (
+          {!UI_DEV_SKIP_SPOTIFY && SPOTIFY_CLIENT_ID && spotifyUsesDynamicRedirect() ? (
             <>
               <Text style={styles.redirectHint}>
                 Add this exact Redirect URI in Spotify Dashboard → Settings:{'\n'}
@@ -516,20 +620,28 @@ export default function RoomScreen() {
                 </Text>
               ) : null}
             </>
-          ) : SPOTIFY_CLIENT_ID ? (
+          ) : !UI_DEV_SKIP_SPOTIFY && SPOTIFY_CLIENT_ID ? (
             <Text style={styles.mutedSmall}>Spotify redirect: spotbattle://spotify-auth</Text>
           ) : null}
-          <Pressable
-            style={styles.secondary}
-            onPress={() => promptAsync()}
-            disabled={!authRequest}>
-            <Text style={styles.secondaryText}>Log in with Spotify</Text>
-          </Pressable>
-          <Pressable style={styles.secondary} onPress={() => void loadMyTracks()}>
-            <Text style={styles.secondaryText}>
-              Load my {room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'} (previews only)
-            </Text>
-          </Pressable>
+          {UI_DEV_SKIP_SPOTIFY ? (
+            <Pressable style={styles.mockTracksBtn} onPress={() => void loadMockTracksForUi()}>
+              <Text style={styles.mockTracksBtnText}>Load mock tracks (no Spotify)</Text>
+            </Pressable>
+          ) : (
+            <>
+              <Pressable
+                style={styles.secondary}
+                onPress={() => promptAsync()}
+                disabled={!authRequest}>
+                <Text style={styles.secondaryText}>Log in with Spotify</Text>
+              </Pressable>
+              <Pressable style={styles.secondary} onPress={() => void loadMyTracks()}>
+                <Text style={styles.secondaryText}>
+                  Load my {room.settings.songSource === 'liked' ? 'liked songs' : 'playlists'} (previews only)
+                </Text>
+              </Pressable>
+            </>
+          )}
           <Pressable style={styles.secondary} onPress={() => void toggleReady()}>
             <Text style={styles.secondaryText}>{me?.ready ? 'Not ready' : 'Ready'}</Text>
           </Pressable>
@@ -637,6 +749,14 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 2,
   },
+  voteHint: {
+    color: theme.textMuted,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 12,
+    paddingHorizontal: 8,
+    lineHeight: 17,
+  },
   choicesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -649,13 +769,34 @@ const styles = StyleSheet.create({
     flexBasis: '45%',
     minWidth: '42%',
     maxWidth: '100%',
-    paddingVertical: 11,
-    paddingHorizontal: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: theme.surface2,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: theme.border,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Web: smooth hover / press (color only — no scale, so border and fill stay aligned). */
+  choiceGuessWeb: {
+    cursor: 'pointer',
+    userSelect: 'none',
+    transitionDuration: '140ms',
+    transitionProperty: 'background-color, border-color, box-shadow',
+    transitionTimingFunction: 'ease-out',
+  },
+  choiceGuessHover: {
+    backgroundColor: '#1c2030',
+    borderColor: '#3d4358',
+  },
+  choiceGuessPressed: {
+    backgroundColor: '#151821',
+    borderColor: '#2f3445',
+  },
+  choiceGuessPressedSelected: {
+    backgroundColor: 'rgba(22, 156, 70, 0.22)',
+    borderColor: '#12a650',
   },
   choiceGuessNarrow: {
     flexBasis: '30%',
@@ -740,7 +881,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.border,
   },
-  choiceSelected: { borderColor: theme.accent },
+  choiceSelected: {
+    borderColor: theme.accent,
+    backgroundColor: 'rgba(30, 215, 96, 0.1)',
+  },
+  /** Web-only outer glow so the ring moves with the same layer as the fill (no “sliding” border). */
+  choiceSelectedWebRing: {
+    boxShadow: '0 0 0 1px rgba(30, 215, 96, 0.4)',
+  },
   choiceText: { color: theme.text, fontSize: 16, fontWeight: '700' },
   answer: { fontSize: 18, fontWeight: '700', color: theme.accent, marginTop: 6 },
   revealCountdown: { fontSize: 16, fontWeight: '800', color: theme.text, marginTop: 8 },
@@ -755,5 +903,28 @@ const styles = StyleSheet.create({
     fontFamily: 'SpaceMono',
     color: theme.accent,
     fontSize: 11,
+  },
+  devBanner: {
+    backgroundColor: '#3d2e00',
+    borderWidth: 1,
+    borderColor: '#8a6a00',
+    borderRadius: 10,
+    padding: 10,
+    color: '#ffd966',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  mockTracksBtn: {
+    borderWidth: 1,
+    borderColor: theme.accent,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    backgroundColor: '#0d2818',
+  },
+  mockTracksBtnText: {
+    color: theme.accent,
+    fontWeight: '700',
+    fontSize: 16,
   },
 });

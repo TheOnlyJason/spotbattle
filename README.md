@@ -14,8 +14,9 @@ Multiplayer party game: connect Spotify, join a room, and guess **whose** track 
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. **Authentication → Providers → Anonymous sign-in** — enable it.
-3. Run the SQL in `supabase/migrations/20260429170000_init.sql` (SQL Editor or `supabase db push` if you use the CLI).
-4. **Database → Replication** — enable realtime for `rooms` and `room_players` (or run the commented `alter publication` lines at the bottom of the migration file).
+3. Run the SQL in **`supabase/migrations/20260429170000_init.sql`** (SQL Editor or CLI).
+4. Run **`supabase/migrations/20260430120000_auto_round_rpcs.sql`** as well. It adds `reveal_started_at` and the RPCs **`finalize_guess_phase`** and **`advance_from_reveal`** (auto reveal after the timer, advance after reveal). Without it, the app logs **`400`** on `/rest/v1/rpc/finalize_guess_phase`.
+5. **Database → Replication** — enable realtime for `rooms` and `room_players` (or run the commented `alter publication` lines at the bottom of the init migration file).
 
 ### 2. Spotify
 
@@ -36,6 +37,7 @@ Copy `.env.example` to `.env` in the project root and fill in:
 - `EXPO_PUBLIC_SUPABASE_URL`
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
 - `EXPO_PUBLIC_SPOTIFY_CLIENT_ID`
+- Optional — **UI/UX only:** `EXPO_PUBLIC_SKIP_SPOTIFY=true` skips Spotify login and the real “Load playlists” flow; the lobby shows **Load mock tracks** and the host can **start with one player** (mock clips only). Remove before real multiplayer tests or release.
 
 Restart Expo after changing env vars (`npx expo start -c`).
 

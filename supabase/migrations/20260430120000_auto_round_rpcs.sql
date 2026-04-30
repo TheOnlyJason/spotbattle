@@ -47,9 +47,7 @@ begin
   end if;
 
   update public.room_players rp
-  set
-    score = rp.score + 100,
-    updated_at = now()
+  set score = rp.score + 100
   from public.rooms rm
   where rm.id = p_room_id
     and rp.room_id = rm.id
@@ -133,7 +131,7 @@ begin
   end if;
 
   update public.room_players
-  set current_vote_player_id = null, updated_at = now()
+  set current_vote_player_id = null
   where room_id = p_room_id;
 
   with
