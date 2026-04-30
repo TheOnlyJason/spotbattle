@@ -27,7 +27,6 @@ import {
   trackPoolFetchSampleTarget,
   trackPoolSampleTarget,
 } from '@/lib/gameLogic';
-import { supabase } from '@/lib/supabase';
 import {
   exchangeSpotifyCode,
   fetchAllPlaylistIds,
@@ -40,6 +39,7 @@ import {
   spotifyUsesDynamicRedirect,
   useSpotifyAuthRequest,
 } from '@/lib/spotify';
+import { supabase } from '@/lib/supabase';
 import type { GameTrack, RoomPlayerRow, RoomRow } from '@/lib/types';
 import { uniqueTracksPerPlayer } from '@/lib/uniquePool';
 
@@ -459,6 +459,10 @@ export default function RoomScreen() {
     return () => clearInterval(t);
   }, [isHost, room?.id, room?.phase, room?.round_started_at, room?.settings.secondsPerRound, refreshLocal]);
 
+  const insets = useSafeAreaInsets();
+  const { height: winH, width: winW } = useWindowDimensions();
+  const artSize = Math.min(winW - 32, Math.max(120, winH * 0.22));
+
   if (loadErr && !room) {
     return (
       <View style={styles.center}>
@@ -479,10 +483,7 @@ export default function RoomScreen() {
   }
 
   const correctPlayer = players.find((p) => p.id === room.correct_player_id);
-  const insets = useSafeAreaInsets();
-  const { height: winH, width: winW } = useWindowDimensions();
   const inGuess = room.phase === 'guess' && Boolean(room.current_track);
-  const artSize = Math.min(winW - 32, Math.max(120, winH * 0.22));
 
   return (
     <View
