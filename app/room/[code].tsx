@@ -885,8 +885,13 @@ export default function RoomScreen() {
           <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
             {room.settings.partyMode ? (
               <View style={styles.guessPartyColumn}>
+                <TrackPreview
+                  uri={room.current_track!.previewUrl}
+                  replayToken={`${room.round_number}-${room.current_track!.id}`}
+                />
                 <Text style={styles.partyModeListenHint}>
-                  Audio plays on the party speaker — listen there, vote here.
+                  Open the party speaker link on a TV or second device for the room. The preview also plays here so
+                  you can hear while voting{Platform.OS === 'web' ? ' (use “Tap to play preview sound” if the browser blocks audio)' : ''}.
                 </Text>
                 <Text style={styles.roundMetaParty}>
                   Round {room.round_number} / {room.settings.rounds}
