@@ -737,6 +737,9 @@ export default function RoomScreen() {
 
   const correctPlayer = players.find((p) => p.id === room.correct_player_id);
   const inGuess = room.phase === 'guess' && Boolean(room.current_track);
+  const partyMode = room.settings.partyMode === true;
+  const showGuessSpoilers = !partyMode || isHost;
+  const hostNickname = players.find((p) => p.user_id === room.host_user_id)?.nickname ?? 'Host';
 
   const guessPlayerCount = players.length;
   const guessChoicesGridStyle =
@@ -828,58 +831,93 @@ export default function RoomScreen() {
           {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
           {busy ? <Text style={styles.busy}>{busy}</Text> : null}
           <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
-            <View style={styles.guessHalfArt}>
-              <TrackPreview
-                uri={room.current_track!.previewUrl}
-                replayToken={`${room.round_number}-${room.current_track!.id}`}
-              />
-              {!room.current_track!.previewUrl ? (
-                <Text style={styles.previewNoteGuess}>
-                  No preview clip — guess from title & artist.
-                </Text>
-              ) : null}
-              <View style={styles.guessArtFrame}>
-                {room.current_track!.imageUrl ? (
-                  <Image
-                    source={{ uri: room.current_track!.imageUrl }}
-                    style={styles.artGuessContain}
-                    resizeMode="contain"
+            {showGuessSpoilers ? (
+              <>
+                <View style={styles.guessHalfArt}>
+                  <TrackPreview
+                    uri={room.current_track!.previewUrl}
+                    replayToken={`${room.round_number}-${room.current_track!.id}`}
                   />
-                ) : (
-                  <View style={styles.artGuessPlaceholder}>
-                    <Text style={styles.artGuessPlaceholderText}>No cover art</Text>
+                  {!room.current_track!.previewUrl ? (
+                    <Text style={styles.previewNoteGuess}>
+                      No preview clip — guess from title & artist.
+                    </Text>
+                  ) : null}
+                  <View style={styles.guessArtFrame}>
+                    {room.current_track!.imageUrl ? (
+                      <Image
+                        source={{ uri: room.current_track!.imageUrl }}
+                        style={styles.artGuessContain}
+                        resizeMode="contain"
+                      />
+                    ) : (
+                      <View style={styles.artGuessPlaceholder}>
+                        <Text style={styles.artGuessPlaceholderText}>No cover art</Text>
+                      </View>
+                    )}
                   </View>
-                )}
-              </View>
-              <View style={styles.guessTrackMeta}>
-                <Text style={styles.trackTitleGuess} numberOfLines={2}>
-                  {room.current_track!.name}
-                </Text>
-                <Text style={styles.mutedGuess} numberOfLines={1}>
-                  {room.current_track!.artists}
-                </Text>
-                <Text style={styles.roundMetaGuess}>
-                  Round {room.round_number} / {room.settings.rounds}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.guessHalfPlayers}>
-              <Text style={styles.guessCardTitle}>Who owns this track?</Text>
-              {guessPlayerCount <= 2 ? (
-                <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
-              ) : (
-                <ScrollView
-                  style={styles.guessChoicesScroll}
-                  contentContainerStyle={styles.guessChoicesScrollContent}
-                  keyboardShouldPersistTaps="handled"
-                  showsVerticalScrollIndicator={false}>
-                  {renderGuessQuizGrid()}
-                </ScrollView>
-              )}
-              <Text style={styles.voteHint}>
-                Tap a name to vote. Tap the same name again to clear — you can skip this round.
-              </Text>
-            </View>
+                  <View style={styles.guessTrackMeta}>
+                    <Text style={styles.trackTitleGuess} numberOfLines={2}>
+                      {room.current_track!.name}
+                    </Text>
+                    <Text style={styles.mutedGuess} numberOfLines={1}>
+                      {room.current_track!.artists}
+                    </Text>
+                    <Text style={styles.roundMetaGuess}>
+                      Round {room.round_number} / {room.settings.rounds}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.guessHalfPlayers}>
+                  <Text style={styles.guessCardTitle}>Who owns this track?</Text>
+                  {guessPlayerCount <= 2 ? (
+                    <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
+                  ) : (
+                    <ScrollView
+                      style={styles.guessChoicesScroll}
+                      contentContainerStyle={styles.guessChoicesScrollContent}
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={false}>
+                      {renderGuessQuizGrid()}
+                    </ScrollView>
+                  )}
+                  <Text style={styles.voteHint}>
+                    Tap a name to vote. Tap the same name again to clear — you can skip this round.
+                  </Text>
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={styles.partyGuestMystery}>
+                  <Text style={styles.partyGuestTitle}>Mystery round</Text>
+                  <Text style={styles.partyGuestBody}>
+                    Listen on {hostNickname}
+                    {"'"}s device for the clip. Nothing plays here and we do not show the track on your
+                    phone.
+                  </Text>
+                  <Text style={styles.roundMetaGuess}>
+                    Round {room.round_number} / {room.settings.rounds}
+                  </Text>
+                </View>
+                <View style={styles.guessHalfPlayers}>
+                  <Text style={styles.guessCardTitle}>Who owns this track?</Text>
+                  {guessPlayerCount <= 2 ? (
+                    <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
+                  ) : (
+                    <ScrollView
+                      style={styles.guessChoicesScroll}
+                      contentContainerStyle={styles.guessChoicesScrollContent}
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={false}>
+                      {renderGuessQuizGrid()}
+                    </ScrollView>
+                  )}
+                  <Text style={styles.voteHint}>
+                    Tap a name to vote. Tap the same name again to clear — you can skip this round.
+                  </Text>
+                </View>
+              </>
+            )}
           </View>
         </View>
       ) : (
@@ -911,6 +949,14 @@ export default function RoomScreen() {
 
             {inLobby ? (
               <View style={styles.lobbyBody}>
+                {partyMode ? (
+                  <View style={styles.partyLobbyBanner}>
+                    <Text style={styles.partyLobbyBannerText}>
+                      Party mode: only {hostNickname}
+                      {"'"}s device plays the preview. Gather around that speaker to hear the clip.
+                    </Text>
+                  </View>
+                ) : null}
                 <Text style={styles.sectionHeading}>Players</Text>
                 <View style={styles.playerList}>
                   {players.map((p) => {
@@ -1023,8 +1069,8 @@ export default function RoomScreen() {
         <View style={[styles.card, styles.cardSpaced]}>
           <Text style={styles.cardTitle}>Game over</Text>
           <Text style={styles.rematchExplainer}>
-            Play again? Everyone must choose Play again. If you leave and fewer than two players
-            remain, the room closes for everyone.
+            Play again? Everyone must choose Play again to start a new match. Back leaves the party
+            — if too few players remain, the room closes for everyone.
           </Text>
           {[...players]
             .sort((a, b) => b.score - a.score)
@@ -1064,20 +1110,10 @@ export default function RoomScreen() {
                 </Text>
               </Pressable>
               <Pressable
-                style={[
-                  styles.rematchSecondary,
-                  me.rematch_choice === 'no' && styles.rematchSecondaryOn,
-                  busy && styles.rematchBtnDisabled,
-                ]}
-                disabled={Boolean(busy)}
-                onPress={() => void setRematchVote('no')}>
-                <Text style={styles.rematchSecondaryText}>Not this time</Text>
-              </Pressable>
-              <Pressable
-                style={styles.rematchLeave}
+                style={styles.secondary}
                 disabled={Boolean(busy)}
                 onPress={() => void leaveParty()}>
-                <Text style={styles.rematchLeaveText}>Leave party</Text>
+                <Text style={styles.secondaryText}>Back</Text>
               </Pressable>
             </View>
           ) : null}
@@ -1085,9 +1121,6 @@ export default function RoomScreen() {
             {players.filter((p) => p.rematch_choice === 'yes').length} / {players.length} voted play
             again
           </Text>
-          <Pressable style={styles.secondary} onPress={() => router.replace('/')}>
-            <Text style={styles.secondaryText}>Home</Text>
-          </Pressable>
         </View>
       )}
           </ScrollView>
@@ -1150,6 +1183,36 @@ const styles = StyleSheet.create({
   codeCompact: { fontSize: 22, fontWeight: '900', color: theme.text, letterSpacing: 3 },
   timerHeader: { fontSize: 22, fontWeight: '900', color: theme.accent },
   guessFill: { flex: 1, minHeight: 0, flexDirection: 'column' },
+  partyGuestMystery: {
+    flexShrink: 0,
+    width: '100%',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: theme.surface2,
+    borderWidth: 1,
+    borderColor: theme.border,
+    gap: 8,
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  partyGuestTitle: { fontSize: 20, fontWeight: '900', color: theme.text },
+  partyGuestBody: {
+    fontSize: 14,
+    lineHeight: 21,
+    color: theme.textMuted,
+    textAlign: 'center',
+    paddingHorizontal: 4,
+  },
+  partyLobbyBanner: {
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: theme.surface2,
+    borderLeftWidth: 4,
+    borderLeftColor: theme.accent,
+  },
+  partyLobbyBannerText: { color: theme.text, fontSize: 14, lineHeight: 20 },
   /** ~50% viewport: art + track meta; picture scales with `contain` inside `guessArtFrame`. */
   guessHalfArt: {
     flex: 1,
@@ -1613,18 +1676,6 @@ const styles = StyleSheet.create({
   rematchPrimaryOn: { backgroundColor: theme.accent, borderColor: theme.accent },
   rematchPrimaryText: { color: theme.text, fontSize: 16, fontWeight: '900' },
   rematchPrimaryTextOn: { color: '#04210f' },
-  rematchSecondary: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: theme.border,
-    paddingVertical: 14,
-    alignItems: 'center',
-    backgroundColor: theme.surface2,
-  },
-  rematchSecondaryOn: { borderColor: theme.accent },
-  rematchSecondaryText: { color: theme.text, fontSize: 15, fontWeight: '800' },
-  rematchLeave: { alignItems: 'center', paddingVertical: 8 },
-  rematchLeaveText: { color: theme.textMuted, fontSize: 14, fontWeight: '700' },
   rematchHint: {
     color: theme.textMuted,
     fontSize: 13,

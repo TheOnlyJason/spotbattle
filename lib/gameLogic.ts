@@ -65,6 +65,7 @@ export function normalizeRoom(row: Record<string, unknown>): RoomRow {
       songSource: settings.songSource === 'liked' ? 'liked' : 'playlists',
       secondsPerRound: Number(settings.secondsPerRound ?? 20),
       deepCuts: Boolean(settings.deepCuts ?? true),
+      partyMode: Boolean(settings.partyMode ?? false),
     },
     round_number: Number(row.round_number ?? 0),
     played_track_ids: Array.isArray(row.played_track_ids)

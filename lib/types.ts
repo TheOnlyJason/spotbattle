@@ -5,6 +5,8 @@ export type RoomSettings = {
   songSource: SongSource;
   secondsPerRound: number;
   deepCuts: boolean;
+  /** When true, only the room host plays preview audio; other players get spoiler-free guessing. */
+  partyMode?: boolean;
 };
 
 export type GameTrack = {
