@@ -5,8 +5,10 @@ export type RoomSettings = {
   songSource: SongSource;
   secondsPerRound: number;
   deepCuts: boolean;
-  /** When true, only the room host plays preview audio; other players get spoiler-free guessing. */
+  /** Host: one shared speaker plays previews; phones show votes only during guess. */
   partyMode?: boolean;
+  /** Optional cap on non-spectator players (server join_room); preserved in jsonb. */
+  maxContestants?: number;
 };
 
 export type GameTrack = {
@@ -48,6 +50,8 @@ export type RoomPlayerRow = {
   id: string;
   room_id: string;
   user_id: string;
+  /** Stream/TV or party speaker; excluded from track pools and voting grid. */
+  is_spectator?: boolean;
   nickname: string;
   spotify_display_name: string | null;
   /** Spotify profile photo URL from GET /v1/me; null if user has no image or has not connected Spotify. */

@@ -21,7 +21,6 @@ const DEFAULT_SETTINGS: RoomSettings = {
   songSource: 'playlists',
   secondsPerRound: 20,
   deepCuts: true,
-  partyMode: false,
 };
 
 export default function CreateScreen() {
@@ -30,7 +29,6 @@ export default function CreateScreen() {
   const [seconds, setSeconds] = useState(String(DEFAULT_SETTINGS.secondsPerRound));
   const [songSource, setSongSource] = useState<SongSource>('playlists');
   const [deepCuts, setDeepCuts] = useState(true);
-  const [partyMode, setPartyMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -55,7 +53,6 @@ export default function CreateScreen() {
         songSource,
         secondsPerRound: s,
         deepCuts,
-        partyMode,
       };
 
       let code = generateRoomCode(4);
@@ -162,16 +159,6 @@ export default function CreateScreen() {
         <Switch value={deepCuts} onValueChange={setDeepCuts} trackColor={{ true: theme.accentDim }} />
       </View>
 
-      <View style={styles.switchRow}>
-        <View style={styles.switchLabelBlock}>
-          <Text style={styles.label}>Party mode (one device plays audio)</Text>
-          <Text style={styles.switchHint}>
-            Other phones do not play the clip and do not show title, artist, or cover during guessing.
-          </Text>
-        </View>
-        <Switch value={partyMode} onValueChange={setPartyMode} trackColor={{ true: theme.accentDim }} />
-      </View>
-
       {err ? <Text style={styles.err}>{err}</Text> : null}
 
       <Pressable style={styles.primary} onPress={onCreate} disabled={busy}>
@@ -210,10 +197,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: 12,
-    gap: 12,
   },
-  switchLabelBlock: { flex: 1, minWidth: 0 },
-  switchHint: { color: theme.textMuted, fontSize: 12, lineHeight: 17, marginTop: 4 },
   err: { color: theme.danger, marginTop: 8 },
   primary: {
     marginTop: 24,

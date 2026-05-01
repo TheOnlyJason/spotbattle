@@ -10,6 +10,7 @@ export function playableEntries(
 ): PlayableEntry[] {
   const pools: Record<string, GameTrack[]> = {};
   for (const p of players) {
+    if (p.is_spectator) continue;
     pools[p.id] = Array.isArray(p.track_pool) ? (p.track_pool as GameTrack[]) : [];
   }
   const combined = combinedPlayablePool(pools, settings.deepCuts);
@@ -52,21 +53,58 @@ export function trackPoolFetchSampleTarget(poolTarget: number): number {
 /** Pools larger than this are treated as pre–preview-only full imports. */
 export const STALE_TRACK_POOL_MAX = 220;
 
+/** Typed slice of `rooms.settings` jsonb (unknown keys are ignored here but preserved via merge helpers). */
+export function normalizeRoomSettings(raw: unknown): RoomSettings {
+  const s = (raw ?? {}) as Record<string, unknown>;
+  const mcRaw = s.maxContestants;
+  let maxContestants: number | undefined;
+  if (mcRaw != null && mcRaw !== '') {
+    const n = Number(mcRaw);
+    if (Number.isFinite(n)) maxContestants = n;
+  }
+  return {
+    rounds: Number(s.rounds ?? 10),
+    songSource: s.songSource === 'liked' ? 'liked' : 'playlists',
+    secondsPerRound: Number(s.secondsPerRound ?? 20),
+    deepCuts: Boolean(s.deepCuts ?? true),
+    partyMode: Boolean(s.partyMode),
+    maxContestants,
+  };
+}
+
+/**
+ * Merge a partial settings update into the last persisted jsonb object so ad-hoc keys
+ * (e.g. maxContestants) are not dropped on host PATCH.
+ */
+export function mergePersistedRoomSettings(
+  previousRaw: Record<string, unknown>,
+  patch: Partial<RoomSettings>
+): Record<string, unknown> {
+  const o: Record<string, unknown> = { ...previousRaw };
+  if (patch.rounds !== undefined) o.rounds = patch.rounds;
+  if (patch.songSource !== undefined) o.songSource = patch.songSource;
+  if (patch.secondsPerRound !== undefined) o.secondsPerRound = patch.secondsPerRound;
+  if (patch.deepCuts !== undefined) o.deepCuts = patch.deepCuts;
+  if (patch.partyMode !== undefined) o.partyMode = patch.partyMode;
+  if ('maxContestants' in patch) {
+    const v = patch.maxContestants;
+    if (v == null || Number.isNaN(Number(v))) {
+      delete o.maxContestants;
+    } else {
+      o.maxContestants = v;
+    }
+  }
+  return o;
+}
+
 export function normalizeRoom(row: Record<string, unknown>): RoomRow {
-  const settings = (row.settings ?? {}) as RoomSettings;
   return {
     id: String(row.id),
     code: String(row.code),
     host_user_id: String(row.host_user_id),
     status: row.status as RoomRow['status'],
     phase: row.phase as RoomRow['phase'],
-    settings: {
-      rounds: Number(settings.rounds ?? 10),
-      songSource: settings.songSource === 'liked' ? 'liked' : 'playlists',
-      secondsPerRound: Number(settings.secondsPerRound ?? 20),
-      deepCuts: Boolean(settings.deepCuts ?? true),
-      partyMode: Boolean(settings.partyMode ?? false),
-    },
+    settings: normalizeRoomSettings(row.settings),
     round_number: Number(row.round_number ?? 0),
     played_track_ids: Array.isArray(row.played_track_ids)
       ? (row.played_track_ids as string[])
@@ -95,6 +133,7 @@ export function normalizePlayer(row: Record<string, unknown>): RoomPlayerRow {
       ? String(row.current_vote_player_id)
       : null,
     rematch_choice: parseRematchChoice(row.rematch_choice),
+    is_spectator: Boolean(row.is_spectator),
   };
 }
 

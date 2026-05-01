@@ -6,7 +6,9 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -18,6 +20,7 @@ import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
 import { enrichTracksWithDeezerPreviews } from '@/lib/deezerPreview';
 import {
+  mergePersistedRoomSettings,
   normalizePlayer,
   normalizeRoom,
   pickRandom,
@@ -43,6 +46,7 @@ import {
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
 import type { GameTrack, RoomPlayerRow, RoomRow, SongSource } from '@/lib/types';
+import { partyDeckUrlForCode } from '@/lib/partyDeckUrl';
 import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
@@ -127,13 +131,14 @@ function PlayerAvatarBubble({ player, size }: { player: RoomPlayerRow; size: 'lo
 
 /** `null` = ready to start; otherwise user-facing reason (also used under the Start button). */
 function lobbyValidationMessage(room: RoomRow, players: RoomPlayerRow[]): string | null {
+  const contesters = players.filter((p) => !p.is_spectator);
   const minPlayers = UI_DEV_SKIP_SPOTIFY ? 1 : 2;
-  if (players.length < minPlayers) {
+  if (contesters.length < minPlayers) {
     return minPlayers === 1
       ? 'Wait for someone to join the room.'
       : 'You need at least two players before starting.';
   }
-  for (const p of players) {
+  for (const p of contesters) {
     const pool = p.track_pool ?? [];
     if (pool.length === 0) {
       return UI_DEV_SKIP_SPOTIFY
@@ -180,6 +185,8 @@ export default function RoomScreen() {
   const prevRoomIdRef = useRef<string | null>(null);
   const autoLibraryLoadedKey = useRef<string | null>(null);
   const lastConfettiBurstKey = useRef<string | null>(null);
+  /** Last `rooms.settings` jsonb from Supabase — merge patches here so extra keys are not lost. */
+  const roomSettingsRawRef = useRef<Record<string, unknown>>({});
 
   const [roomDissolved, setRoomDissolved] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
@@ -190,6 +197,7 @@ export default function RoomScreen() {
     () => players.find((p) => p.user_id === myUserId) ?? null,
     [players, myUserId]
   );
+  const contesters = useMemo(() => players.filter((p) => !p.is_spectator), [players]);
   const displayVotePlayerId =
     optimisticVotePlayerId !== undefined
       ? optimisticVotePlayerId
@@ -245,7 +253,13 @@ export default function RoomScreen() {
     prevRoomIdRef.current = r.id as string;
     setRoomDissolved(false);
     setLoadErr(null);
-    setRoom(normalizeRoom(r as Record<string, unknown>));
+    const rawRow = r as Record<string, unknown>;
+    const rs = rawRow.settings;
+    roomSettingsRawRef.current =
+      rs && typeof rs === 'object' && !Array.isArray(rs)
+        ? { ...(rs as Record<string, unknown>) }
+        : {};
+    setRoom(normalizeRoom(rawRow));
     const { data: plist } = await supabase
       .from('room_players')
       .select('*')
@@ -571,7 +585,8 @@ export default function RoomScreen() {
       };
     }
     const poolTarget = trackPoolSampleTarget(room.settings.rounds, room.settings.deepCuts);
-    if (!players.length) {
+    const contesters = players.filter((p) => !p.is_spectator);
+    if (!contesters.length) {
       return {
         isLobby: true,
         poolTarget,
@@ -581,7 +596,7 @@ export default function RoomScreen() {
         startHint: lobbyValidationMessage(room, players) ?? 'Waiting for players to join…',
       };
     }
-    const scored = players.map((p) => {
+    const scored = contesters.map((p) => {
       const pool = p.track_pool ?? [];
       const prev = pool.filter((t) => Boolean(t.previewUrl)).length;
       if (pool.length === 0) return { nick: p.nickname, prev, score: 0 };
@@ -608,6 +623,34 @@ export default function RoomScreen() {
       startHint: msg ?? '',
     };
   }, [room, players]);
+
+  async function setPartyModeEnabled(next: boolean) {
+    if (!room?.id || !isHost || !inLobby) return;
+    setLoadErr(null);
+    try {
+      const merged = mergePersistedRoomSettings(roomSettingsRawRef.current, { partyMode: next });
+      const { error } = await supabase.from('rooms').update({ settings: merged }).eq('id', room.id);
+      if (error) throw new Error(error.message);
+      roomSettingsRawRef.current = merged;
+      await refreshLocal();
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : 'Could not update party mode');
+    }
+  }
+
+  async function sharePartyDeckLink() {
+    if (!room) return;
+    const url = partyDeckUrlForCode(room.code);
+    try {
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        return;
+      }
+      await Share.share({ message: url, ...(Platform.OS === 'ios' ? { url } : {}) });
+    } catch {
+      /* user dismissed share sheet or clipboard blocked */
+    }
+  }
 
   async function clearVotes(roomId: string) {
     await supabase.from('room_players').update({ current_vote_player_id: null }).eq('room_id', roomId);
@@ -737,11 +780,8 @@ export default function RoomScreen() {
 
   const correctPlayer = players.find((p) => p.id === room.correct_player_id);
   const inGuess = room.phase === 'guess' && Boolean(room.current_track);
-  const partyMode = room.settings.partyMode === true;
-  const showGuessSpoilers = !partyMode || isHost;
-  const hostNickname = players.find((p) => p.user_id === room.host_user_id)?.nickname ?? 'Host';
 
-  const guessPlayerCount = players.length;
+  const guessPlayerCount = contesters.length;
   const guessChoicesGridStyle =
     guessPlayerCount === 1
       ? styles.choicesGridSingle
@@ -765,7 +805,7 @@ export default function RoomScreen() {
 
   const renderGuessQuizGrid = () => (
     <View style={[styles.choicesGrid, guessChoicesGridStyle]}>
-      {players.map((p, index) => {
+      {contesters.map((p, index) => {
         const selected = displayVotePlayerId === p.id;
         const pal = GUESS_PLAYER_PALETTE[index % GUESS_PLAYER_PALETTE.length]!;
         const fs = guessDisplayNameFontSize(p.nickname);
@@ -831,7 +871,31 @@ export default function RoomScreen() {
           {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
           {busy ? <Text style={styles.busy}>{busy}</Text> : null}
           <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
-            {showGuessSpoilers ? (
+            {room.settings.partyMode ? (
+              <View style={styles.guessPartyColumn}>
+                <Text style={styles.partyModeListenHint}>
+                  Audio plays on the party speaker — listen there, vote here.
+                </Text>
+                <Text style={styles.roundMetaParty}>
+                  Round {room.round_number} / {room.settings.rounds}
+                </Text>
+                <Text style={styles.guessCardTitle}>Who owns this track?</Text>
+                {guessPlayerCount <= 2 ? (
+                  <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
+                ) : (
+                  <ScrollView
+                    style={styles.guessChoicesScroll}
+                    contentContainerStyle={styles.guessChoicesScrollContent}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}>
+                    {renderGuessQuizGrid()}
+                  </ScrollView>
+                )}
+                <Text style={styles.voteHint}>
+                  Tap a name to vote. Tap the same name again to clear — you can skip this round.
+                </Text>
+              </View>
+            ) : (
               <>
                 <View style={styles.guessHalfArt}>
                   <TrackPreview
@@ -886,37 +950,6 @@ export default function RoomScreen() {
                   </Text>
                 </View>
               </>
-            ) : (
-              <>
-                <View style={styles.partyGuestMystery}>
-                  <Text style={styles.partyGuestTitle}>Mystery round</Text>
-                  <Text style={styles.partyGuestBody}>
-                    Listen on {hostNickname}
-                    {"'"}s device for the clip. Nothing plays here and we do not show the track on your
-                    phone.
-                  </Text>
-                  <Text style={styles.roundMetaGuess}>
-                    Round {room.round_number} / {room.settings.rounds}
-                  </Text>
-                </View>
-                <View style={styles.guessHalfPlayers}>
-                  <Text style={styles.guessCardTitle}>Who owns this track?</Text>
-                  {guessPlayerCount <= 2 ? (
-                    <View style={styles.guessChoicesFill}>{renderGuessQuizGrid()}</View>
-                  ) : (
-                    <ScrollView
-                      style={styles.guessChoicesScroll}
-                      contentContainerStyle={styles.guessChoicesScrollContent}
-                      keyboardShouldPersistTaps="handled"
-                      showsVerticalScrollIndicator={false}>
-                      {renderGuessQuizGrid()}
-                    </ScrollView>
-                  )}
-                  <Text style={styles.voteHint}>
-                    Tap a name to vote. Tap the same name again to clear — you can skip this round.
-                  </Text>
-                </View>
-              </>
             )}
           </View>
         </View>
@@ -949,14 +982,6 @@ export default function RoomScreen() {
 
             {inLobby ? (
               <View style={styles.lobbyBody}>
-                {partyMode ? (
-                  <View style={styles.partyLobbyBanner}>
-                    <Text style={styles.partyLobbyBannerText}>
-                      Party mode: only {hostNickname}
-                      {"'"}s device plays the preview. Gather around that speaker to hear the clip.
-                    </Text>
-                  </View>
-                ) : null}
                 <Text style={styles.sectionHeading}>Players</Text>
                 <View style={styles.playerList}>
                   {players.map((p) => {
@@ -974,6 +999,11 @@ export default function RoomScreen() {
                             {hostSeat ? (
                               <View style={styles.hostBadge}>
                                 <Text style={styles.hostBadgeText}>Host</Text>
+                              </View>
+                            ) : null}
+                            {p.is_spectator ? (
+                              <View style={styles.speakerBadge}>
+                                <Text style={styles.speakerBadgeText}>Speaker</Text>
                               </View>
                             ) : null}
                           </View>
@@ -1004,6 +1034,39 @@ export default function RoomScreen() {
                     Strength is based on the smallest preview library in the room.
                   </Text>
                 </View>
+
+                {isHost ? (
+                  <View style={styles.partyModeCard}>
+                    <View style={styles.partyModeRow}>
+                      <View style={styles.partyModeLabelCol}>
+                        <Text style={styles.sectionHeading}>Party mode</Text>
+                        <Text style={styles.partyModeHelp}>
+                          One speaker plays the clip for everyone; phones show only the vote grid.
+                        </Text>
+                      </View>
+                      <Switch
+                        accessibilityLabel="Party mode"
+                        value={Boolean(room.settings.partyMode)}
+                        onValueChange={(v) => void setPartyModeEnabled(v)}
+                      />
+                    </View>
+                  </View>
+                ) : null}
+
+                {room.settings.partyMode ? (
+                  <View style={styles.partyDeckCard}>
+                    <Text style={styles.sectionHeading}>Party speaker</Text>
+                    <Text style={styles.partyDeckHelp}>
+                      Open this link on the TV or stereo device (stay on this page during the game).
+                    </Text>
+                    <Text style={styles.partyDeckUrl} selectable>
+                      {partyDeckUrlForCode(room.code)}
+                    </Text>
+                    <Pressable style={styles.partyDeckShareBtn} onPress={() => void sharePartyDeckLink()}>
+                      <Text style={styles.partyDeckShareBtnText}>Copy or share link</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
 
                 {UI_DEV_SKIP_SPOTIFY && me && (me.track_pool?.length ?? 0) === 0 ? (
                   <Pressable
@@ -1072,7 +1135,7 @@ export default function RoomScreen() {
             Play again? Everyone must choose Play again to start a new match. Back leaves the party
             — if too few players remain, the room closes for everyone.
           </Text>
-          {[...players]
+          {[...contesters]
             .sort((a, b) => b.score - a.score)
             .map((p, i) => (
               <View key={p.id} style={styles.scoreRowWithVote}>
@@ -1118,7 +1181,7 @@ export default function RoomScreen() {
             </View>
           ) : null}
           <Text style={styles.rematchHint}>
-            {players.filter((p) => p.rematch_choice === 'yes').length} / {players.length} voted play
+            {contesters.filter((p) => p.rematch_choice === 'yes').length} / {contesters.length} voted play
             again
           </Text>
         </View>
@@ -1183,36 +1246,21 @@ const styles = StyleSheet.create({
   codeCompact: { fontSize: 22, fontWeight: '900', color: theme.text, letterSpacing: 3 },
   timerHeader: { fontSize: 22, fontWeight: '900', color: theme.accent },
   guessFill: { flex: 1, minHeight: 0, flexDirection: 'column' },
-  partyGuestMystery: {
-    flexShrink: 0,
+  guessPartyColumn: {
+    flex: 1,
+    minHeight: 0,
     width: '100%',
-    paddingVertical: 16,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    backgroundColor: theme.surface2,
-    borderWidth: 1,
-    borderColor: theme.border,
-    gap: 8,
-    alignItems: 'center',
-    marginBottom: 4,
+    gap: 10,
+    paddingTop: 4,
   },
-  partyGuestTitle: { fontSize: 20, fontWeight: '900', color: theme.text },
-  partyGuestBody: {
+  partyModeListenHint: {
+    color: theme.textMuted,
     fontSize: 14,
     lineHeight: 21,
-    color: theme.textMuted,
     textAlign: 'center',
-    paddingHorizontal: 4,
+    paddingHorizontal: 8,
   },
-  partyLobbyBanner: {
-    marginBottom: 12,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: theme.surface2,
-    borderLeftWidth: 4,
-    borderLeftColor: theme.accent,
-  },
-  partyLobbyBannerText: { color: theme.text, fontSize: 14, lineHeight: 20 },
+  roundMetaParty: { color: theme.textMuted, fontSize: 13, textAlign: 'center' },
   /** ~50% viewport: art + track meta; picture scales with `contain` inside `guessArtFrame`. */
   guessHalfArt: {
     flex: 1,
@@ -1483,6 +1531,15 @@ const styles = StyleSheet.create({
     borderColor: theme.border,
   },
   hostBadgeText: { color: theme.accent, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  speakerBadge: {
+    backgroundColor: theme.surface2,
+    borderRadius: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  speakerBadgeText: { color: theme.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
   playerSpotifyName: { color: theme.textMuted, fontSize: 13, marginTop: 4 },
   trackCountBadge: {
     alignItems: 'center',
@@ -1508,6 +1565,40 @@ const styles = StyleSheet.create({
   },
   poolSub: { color: theme.text, fontSize: 15, fontWeight: '700' },
   poolHint: { color: theme.textMuted, fontSize: 13, lineHeight: 19 },
+  partyModeCard: {
+    marginTop: 20,
+    backgroundColor: theme.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: 18,
+    gap: 8,
+  },
+  partyModeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  partyModeLabelCol: { flex: 1, minWidth: 0 },
+  partyModeHelp: { color: theme.textMuted, fontSize: 13, lineHeight: 19, marginTop: 6 },
+  partyDeckCard: {
+    marginTop: 16,
+    backgroundColor: theme.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: 18,
+    gap: 10,
+  },
+  partyDeckHelp: { color: theme.textMuted, fontSize: 13, lineHeight: 19 },
+  partyDeckUrl: { color: theme.accent, fontSize: 13, lineHeight: 18 },
+  partyDeckShareBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: theme.surface2,
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  partyDeckShareBtnText: { color: theme.text, fontSize: 14, fontWeight: '800' },
   progressTrack: {
     height: 12,
     borderRadius: 8,
