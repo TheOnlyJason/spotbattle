@@ -126,6 +126,12 @@ export default function PartyDeckScreen() {
       if (Date.now() < end) return;
       clearInterval(t);
       void (async () => {
+        try {
+          await ensureAnonSession();
+        } catch (e) {
+          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          return;
+        }
         const { error } = await supabase.rpc('finalize_guess_phase', { p_room_id: roomId });
         if (error) setLoadErr(error.message);
         await refreshLocal();
@@ -141,6 +147,12 @@ export default function PartyDeckScreen() {
     const delay = Math.max(0, fireAt - Date.now());
     const tid = setTimeout(() => {
       void (async () => {
+        try {
+          await ensureAnonSession();
+        } catch (e) {
+          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          return;
+        }
         const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
         if (error) setLoadErr(error.message);
         await refreshLocal();

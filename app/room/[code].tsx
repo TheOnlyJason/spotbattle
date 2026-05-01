@@ -46,7 +46,7 @@ import {
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
 import type { GameTrack, RoomPlayerRow, RoomRow, SongSource } from '@/lib/types';
-import { partyDeckUrlForCode } from '@/lib/partyDeckUrl';
+import { partyDeckAbsoluteUrlForCode, partyDeckUrlForCode } from '../../lib/partyDeckUrl';
 import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
@@ -640,7 +640,7 @@ export default function RoomScreen() {
 
   async function sharePartyDeckLink() {
     if (!room) return;
-    const url = partyDeckUrlForCode(room.code);
+    const url = partyDeckAbsoluteUrlForCode(room.code);
     try {
       if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(url);
@@ -720,6 +720,12 @@ export default function RoomScreen() {
       if (Date.now() < end) return;
       clearInterval(t);
       void (async () => {
+        try {
+          await ensureAnonSession();
+        } catch (e) {
+          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          return;
+        }
         const { error } = await supabase.rpc('finalize_guess_phase', { p_room_id: roomId });
         if (error) setLoadErr(error.message);
         await refreshLocal();
@@ -735,6 +741,12 @@ export default function RoomScreen() {
     const delay = Math.max(0, fireAt - Date.now());
     const tid = setTimeout(() => {
       void (async () => {
+        try {
+          await ensureAnonSession();
+        } catch (e) {
+          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          return;
+        }
         const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
         if (error) setLoadErr(error.message);
         await refreshLocal();

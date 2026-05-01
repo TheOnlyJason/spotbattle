@@ -3,11 +3,19 @@ export function partyDeckPathForCode(code: string): string {
   return `/party-deck/${encodeURIComponent(code.trim().toUpperCase())}`;
 }
 
-/** Full URL on web; path-only elsewhere (e.g. Expo Go). */
+/**
+ * Path-only (e.g. `/party-deck/ABCD`). Same on server and client so web SSR/hydration matches.
+ * For copy/share, use `partyDeckAbsoluteUrlForCode` inside handlers or `useEffect`.
+ */
 export function partyDeckUrlForCode(code: string): string {
-  const c = code.trim().toUpperCase();
+  return partyDeckPathForCode(code);
+}
+
+/** Full URL on web; path-only when `window` is unavailable (e.g. native / SSR). Use from handlers, not initial render. */
+export function partyDeckAbsoluteUrlForCode(code: string): string {
+  const path = partyDeckPathForCode(code);
   if (typeof window !== 'undefined' && window.location?.origin) {
-    return `${window.location.origin}/party-deck/${c}`;
+    return `${window.location.origin}${path}`;
   }
-  return partyDeckPathForCode(c);
+  return path;
 }
