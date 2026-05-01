@@ -38,6 +38,7 @@ create table if not exists public.room_players (
   ready boolean not null default false,
   current_vote_player_id uuid,
   created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
   unique (room_id, user_id)
 );
 
