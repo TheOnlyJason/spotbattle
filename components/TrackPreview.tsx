@@ -2,6 +2,8 @@ import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-au
 import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text } from 'react-native';
 
+import { usePreviewVolumeOptional } from '@/contexts/PreviewVolumeContext';
+
 type Props = {
   uri: string | null;
   /** When this changes, preview restarts (e.g. new round). */
@@ -20,10 +22,20 @@ const tapHelpPlatforms = Platform.OS === 'web' || Platform.OS === 'ios';
 
 /** Plays a remote preview URL during the guess phase (expo-audio). */
 export function TrackPreview({ uri, replayToken = 0 }: Props) {
+  const previewVol = usePreviewVolumeOptional();
+  const volume = previewVol?.volume ?? 1;
   const player = useAudioPlayer(uri);
   const status = useAudioPlayerStatus(player);
   const statusRef = useRef(status);
   statusRef.current = status;
+
+  useEffect(() => {
+    try {
+      player.volume = volume;
+    } catch {
+      /* noop */
+    }
+  }, [player, volume]);
 
   /** Web autoplay policy + iOS session/route edge cases: offer explicit tap to start. */
   const [needsTapToPlay, setNeedsTapToPlay] = useState(false);

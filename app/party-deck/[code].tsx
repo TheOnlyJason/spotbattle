@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { PreviewVolumeSlider } from '@/components/PreviewVolumeSlider';
 import { TrackPreview } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
@@ -221,6 +222,7 @@ export default function PartyDeckScreen() {
             uri={room.current_track.previewUrl}
             replayToken={`${room.round_number}-${room.current_track.id}`}
           />
+          <PreviewVolumeSlider />
           {!room.current_track.previewUrl ? (
             <Text style={styles.previewNote}>No preview clip on this track.</Text>
           ) : null}

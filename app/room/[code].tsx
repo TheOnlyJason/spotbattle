@@ -15,6 +15,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ConfettiCelebration } from '@/components/ConfettiCelebration';
+import { PreviewVolumeSlider } from '@/components/PreviewVolumeSlider';
 import { TrackPreview } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
@@ -46,8 +47,8 @@ import {
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
 import type { GameTrack, RoomPlayerRow, RoomRow, SongSource } from '@/lib/types';
-import { partyDeckAbsoluteUrlForCode, partyDeckUrlForCode } from '../../lib/partyDeckUrl';
 import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
+import { partyDeckAbsoluteUrlForCode, partyDeckUrlForCode } from '../../lib/partyDeckUrl';
 
 const SPOTIFY_CLIENT_ID = process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '';
 /** Must match `advance_from_reveal` dwell in Supabase migration. */
@@ -879,6 +880,7 @@ export default function RoomScreen() {
             </View>
             {secondsLeft !== null ? <Text style={styles.timerHeader}>{secondsLeft}s</Text> : null}
           </View>
+          <PreviewVolumeSlider compact />
           {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
           {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
           {busy ? <Text style={styles.busy}>{busy}</Text> : null}
