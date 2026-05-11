@@ -107,7 +107,7 @@ type Props = {
 };
 
 /**
- * Full-screen burst (pointerEvents none). Mount with a new key per reveal to replay.
+ * Full-screen burst (`pointerEvents: 'none'` on layer). Mount with a new key per reveal to replay.
  */
 export function ConfettiCelebration({ onComplete }: Props) {
   const { width, height } = useWindowDimensions();
@@ -126,7 +126,7 @@ export function ConfettiCelebration({ onComplete }: Props) {
   }, [onComplete, progress]);
 
   return (
-    <View style={[StyleSheet.absoluteFillObject, styles.layer]} pointerEvents="none">
+    <View style={[StyleSheet.absoluteFillObject, styles.layer]}>
       {particles.map((p, i) => (
         <ConfettiPiece key={i} progress={progress} {...p} />
       ))}
@@ -138,5 +138,6 @@ const styles = StyleSheet.create({
   layer: {
     zIndex: 200,
     elevation: 200,
+    pointerEvents: 'none',
   },
 });

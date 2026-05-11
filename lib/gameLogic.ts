@@ -1,4 +1,11 @@
-import type { GameTrack, RematchChoice, RoomPlayerRow, RoomRow, RoomSettings } from '@/lib/types';
+import type {
+  GameTrack,
+  RematchChoice,
+  RoomPlayerRow,
+  RoomRow,
+  RoomSettings,
+  RoundRecapEntry,
+} from '@/lib/types';
 import { combinedPlayablePool } from '@/lib/uniquePool';
 
 export type PlayableEntry = { track: GameTrack; ownerPlayerId: string };
@@ -97,6 +104,24 @@ export function mergePersistedRoomSettings(
   return o;
 }
 
+function parseRoundRecap(raw: unknown): RoundRecapEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RoundRecapEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const correctRaw = o.correctVoterIds;
+    const correctVoterIds = Array.isArray(correctRaw) ? correctRaw.map((x) => String(x)) : [];
+    out.push({
+      round: Number(o.round ?? 0),
+      trackId: String(o.trackId ?? ''),
+      trackName: String(o.trackName ?? ''),
+      correctVoterIds,
+    });
+  }
+  return out;
+}
+
 export function normalizeRoom(row: Record<string, unknown>): RoomRow {
   return {
     id: String(row.id),
@@ -113,6 +138,7 @@ export function normalizeRoom(row: Record<string, unknown>): RoomRow {
     correct_player_id: row.correct_player_id ? String(row.correct_player_id) : null,
     round_started_at: row.round_started_at ? String(row.round_started_at) : null,
     reveal_started_at: row.reveal_started_at ? String(row.reveal_started_at) : null,
+    round_recap: parseRoundRecap(row.round_recap),
     created_at: String(row.created_at ?? ''),
     updated_at: String(row.updated_at ?? ''),
   };
@@ -132,6 +158,7 @@ export function normalizePlayer(row: Record<string, unknown>): RoomPlayerRow {
     current_vote_player_id: row.current_vote_player_id
       ? String(row.current_vote_player_id)
       : null,
+    vote_submitted_at: row.vote_submitted_at ? String(row.vote_submitted_at) : null,
     rematch_choice: parseRematchChoice(row.rematch_choice),
     is_spectator: Boolean(row.is_spectator),
   };

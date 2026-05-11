@@ -25,6 +25,15 @@ export type GameTrack = {
   sourcePlaylistName?: string | null;
 };
 
+/** One row per finished guess round, appended when entering reveal (see `finalize_guess_phase`). */
+export type RoundRecapEntry = {
+  round: number;
+  trackId: string;
+  trackName: string;
+  /** `room_players.id` for contestants who guessed the owner correctly. */
+  correctVoterIds: string[];
+};
+
 export type RoomRow = {
   id: string;
   code: string;
@@ -39,6 +48,8 @@ export type RoomRow = {
   round_started_at: string | null;
   /** Server sets when entering reveal; used for auto-advance after dwell. */
   reveal_started_at: string | null;
+  /** Running log of rounds (song + who guessed right); used on reveal screen. */
+  round_recap: RoundRecapEntry[];
   created_at: string;
   updated_at: string;
 };
@@ -60,5 +71,7 @@ export type RoomPlayerRow = {
   score: number;
   ready: boolean;
   current_vote_player_id: string | null;
+  /** Server sets on first guess in a round; used for speed bonus scoring. */
+  vote_submitted_at?: string | null;
   rematch_choice: RematchChoice;
 };

@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { RoundRecapList } from '@/components/RoundRecapList';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
 import { normalizePlayer, normalizeRoom } from '@/lib/gameLogic';
@@ -134,21 +135,26 @@ export default function WatchScreen() {
     if (!room || room.phase !== 'reveal' || !room.reveal_started_at) return;
     const roomId = room.id;
     const fireAt = new Date(room.reveal_started_at).getTime() + REVEAL_DWELL_MS;
-    const delay = Math.max(0, fireAt - Date.now());
-    const tid = setTimeout(() => {
+    let inFlight = false;
+    const tick = () => {
+      if (Date.now() < fireAt || inFlight) return;
+      inFlight = true;
       void (async () => {
         try {
           await ensureAnonSession();
+          const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
+          if (error) setLoadErr(error.message);
+          await refreshLocal();
         } catch (e) {
           setLoadErr(e instanceof Error ? e.message : 'Session lost');
-          return;
+        } finally {
+          inFlight = false;
         }
-        const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
-        if (error) setLoadErr(error.message);
-        await refreshLocal();
       })();
-    }, delay);
-    return () => clearTimeout(tid);
+    };
+    const t = setInterval(tick, 400);
+    tick();
+    return () => clearInterval(t);
   }, [room?.id, room?.phase, room?.reveal_started_at, refreshLocal]);
 
   if (loadErr && !room) {
@@ -231,6 +237,7 @@ export default function WatchScreen() {
 
       {room.phase === 'reveal' && room.current_track ? (
         <View style={styles.card}>
+          <RoundRecapList entries={room.round_recap} players={players} />
           <Text style={styles.cardTitle}>Answer</Text>
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.muted}>{room.current_track.artists}</Text>

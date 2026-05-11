@@ -11,8 +11,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { PreviewVolumeSlider } from '@/components/PreviewVolumeSlider';
-import { TrackPreview } from '@/components/TrackPreview';
+import { RoundRecapList } from '@/components/RoundRecapList';
+import { PreviewVolumeControl, TrackPreviewHost, TrackPreviewSlot } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
 import { normalizePlayer, normalizeRoom } from '@/lib/gameLogic';
@@ -145,21 +145,26 @@ export default function PartyDeckScreen() {
     if (!room || room.phase !== 'reveal' || !room.reveal_started_at) return;
     const roomId = room.id;
     const fireAt = new Date(room.reveal_started_at).getTime() + REVEAL_DWELL_MS;
-    const delay = Math.max(0, fireAt - Date.now());
-    const tid = setTimeout(() => {
+    let inFlight = false;
+    const tick = () => {
+      if (Date.now() < fireAt || inFlight) return;
+      inFlight = true;
       void (async () => {
         try {
           await ensureAnonSession();
+          const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
+          if (error) setLoadErr(error.message);
+          await refreshLocal();
         } catch (e) {
           setLoadErr(e instanceof Error ? e.message : 'Session lost');
-          return;
+        } finally {
+          inFlight = false;
         }
-        const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
-        if (error) setLoadErr(error.message);
-        await refreshLocal();
       })();
-    }, delay);
-    return () => clearTimeout(tid);
+    };
+    const t = setInterval(tick, 400);
+    tick();
+    return () => clearInterval(t);
   }, [room?.id, room?.phase, room?.reveal_started_at, refreshLocal]);
 
   if (loadErr && !room) {
@@ -213,16 +218,18 @@ export default function PartyDeckScreen() {
       )}
 
       {room.phase === 'guess' && room.current_track ? (
-        <View style={styles.card}>
-          <View style={styles.guessHeader}>
-            <Text style={styles.cardTitle}>Round {room.round_number}</Text>
-            {secondsLeft !== null ? <Text style={styles.timer}>{secondsLeft}s</Text> : null}
-          </View>
-          <TrackPreview
-            uri={room.current_track.previewUrl}
-            replayToken={`${room.round_number}-${room.current_track.id}`}
-          />
-          <PreviewVolumeSlider />
+        <TrackPreviewHost
+          uri={room.current_track.previewUrl}
+          replayToken={`${room.round_number}-${room.current_track.id}`}>
+          <View style={styles.card}>
+            <View style={styles.guessHeader}>
+              <Text style={styles.cardTitle}>Round {room.round_number}</Text>
+              <View style={styles.guessHeaderRight}>
+                {secondsLeft !== null ? <Text style={styles.timer}>{secondsLeft}s</Text> : null}
+                <PreviewVolumeControl />
+              </View>
+            </View>
+            <TrackPreviewSlot />
           {!room.current_track.previewUrl ? (
             <Text style={styles.previewNote}>No preview clip on this track.</Text>
           ) : null}
@@ -247,11 +254,13 @@ export default function PartyDeckScreen() {
               {i + 1}. {p.nickname} — {p.score} pts
             </Text>
           ))}
-        </View>
+          </View>
+        </TrackPreviewHost>
       ) : null}
 
       {room.phase === 'reveal' && room.current_track ? (
         <View style={styles.card}>
+          <RoundRecapList entries={room.round_recap} players={players} />
           <Text style={styles.cardTitle}>Answer</Text>
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.muted}>{room.current_track.artists}</Text>
@@ -304,6 +313,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 8,
+  },
+  guessHeaderRight: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
   },
   timer: { fontSize: 40, fontWeight: '900', color: theme.accent },
   previewNote: { color: theme.accent, fontSize: 13, fontWeight: '600' },

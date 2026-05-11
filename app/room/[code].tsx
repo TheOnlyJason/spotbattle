@@ -15,8 +15,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ConfettiCelebration } from '@/components/ConfettiCelebration';
-import { PreviewVolumeSlider } from '@/components/PreviewVolumeSlider';
-import { TrackPreview } from '@/components/TrackPreview';
+import { RoundRecapList } from '@/components/RoundRecapList';
+import { PreviewVolumeControl, TrackPreviewHost, TrackPreviewSlot } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
 import { ensureAnonSession } from '@/lib/auth';
 import { enrichTracksWithDeezerPreviews } from '@/lib/deezerPreview';
@@ -46,7 +46,7 @@ import {
   useSpotifyAuthRequest,
 } from '@/lib/spotify';
 import { supabase } from '@/lib/supabase';
-import type { GameTrack, RoomPlayerRow, RoomRow, SongSource } from '@/lib/types';
+import type { GameTrack, RoomPlayerRow, RoomRow, RoomSettings, SongSource } from '@/lib/types';
 import { getMockTrackPoolForUi, UI_DEV_SKIP_SPOTIFY } from '@/lib/uiDevMode';
 import { partyDeckAbsoluteUrlForCode, partyDeckUrlForCode } from '../../lib/partyDeckUrl';
 
@@ -130,6 +130,17 @@ function PlayerAvatarBubble({ player, size }: { player: RoomPlayerRow; size: 'lo
   );
 }
 
+/**
+ * UI dev mock pools reuse the same track ids for every player. Deep cuts would then yield an
+ * empty combined pool — disable deep cuts only for playable math while skip-Spotify is on.
+ */
+function effectiveRoomSettingsForPlayable(room: RoomRow): RoomSettings {
+  if (UI_DEV_SKIP_SPOTIFY && room.settings.deepCuts) {
+    return { ...room.settings, deepCuts: false };
+  }
+  return room.settings;
+}
+
 /** `null` = ready to start; otherwise user-facing reason (also used under the Start button). */
 function lobbyValidationMessage(room: RoomRow, players: RoomPlayerRow[]): string | null {
   const contesters = players.filter((p) => !p.is_spectator);
@@ -159,7 +170,7 @@ function lobbyValidationMessage(room: RoomRow, players: RoomPlayerRow[]): string
     }
   }
   const played = new Set<string>();
-  const entries = playableEntries(players, room.settings, played);
+  const entries = playableEntries(players, effectiveRoomSettingsForPlayable(room), played);
   if (!entries.length) {
     return 'No playable tracks with current settings. Add more music or turn off Deep cuts.';
   }
@@ -544,7 +555,13 @@ export default function RoomScreen() {
       .from('room_players')
       .update({ current_vote_player_id: nextVote })
       .eq('id', playerRowId);
-    if (error) throw new Error(error.message);
+    if (error) {
+      const m = error.message ?? '';
+      if (m.includes('VOTE_LOCKED')) {
+        throw new Error('Your pick is locked in for this round.');
+      }
+      throw new Error(m);
+    }
     await refreshLocal();
   }
 
@@ -555,7 +572,8 @@ export default function RoomScreen() {
       optimisticVotePlayerId !== undefined
         ? optimisticVotePlayerId
         : (me.current_vote_player_id ?? null);
-    const next = current === targetPlayerId ? null : targetPlayerId;
+    if (current !== null) return;
+    const next = targetPlayerId;
     const seq = ++voteRequestSeq.current;
     setOptimisticVotePlayerId(next);
     void (async () => {
@@ -654,7 +672,10 @@ export default function RoomScreen() {
   }
 
   async function clearVotes(roomId: string) {
-    await supabase.from('room_players').update({ current_vote_player_id: null }).eq('room_id', roomId);
+    await supabase
+      .from('room_players')
+      .update({ current_vote_player_id: null, vote_submitted_at: null })
+      .eq('room_id', roomId);
   }
 
   async function startGame() {
@@ -668,7 +689,7 @@ export default function RoomScreen() {
     try {
       await clearVotes(room.id);
       const played = new Set<string>();
-      const entries = playableEntries(players, room.settings, played);
+      const entries = playableEntries(players, effectiveRoomSettingsForPlayable(room), played);
       const choice = pickRandom(entries);
       if (!choice) throw new Error('No track');
       const { error } = await supabase
@@ -678,6 +699,7 @@ export default function RoomScreen() {
           phase: 'guess',
           round_number: 1,
           played_track_ids: [],
+          round_recap: [],
           current_track: choice.track,
           correct_player_id: choice.ownerPlayerId,
           round_started_at: new Date().toISOString(),
@@ -739,21 +761,27 @@ export default function RoomScreen() {
     if (!room || room.phase !== 'reveal' || !room.reveal_started_at) return;
     const roomId = room.id;
     const fireAt = new Date(room.reveal_started_at).getTime() + REVEAL_DWELL_MS;
-    const delay = Math.max(0, fireAt - Date.now());
-    const tid = setTimeout(() => {
+    /** Server RPC no-ops until server clock passes dwell; one-shot timers can fire slightly early and strand the UI — poll like guess phase. */
+    let inFlight = false;
+    const tick = () => {
+      if (Date.now() < fireAt || inFlight) return;
+      inFlight = true;
       void (async () => {
         try {
           await ensureAnonSession();
+          const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
+          if (error) setLoadErr(error.message);
+          await refreshLocal();
         } catch (e) {
           setLoadErr(e instanceof Error ? e.message : 'Session lost');
-          return;
+        } finally {
+          inFlight = false;
         }
-        const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
-        if (error) setLoadErr(error.message);
-        await refreshLocal();
       })();
-    }, delay);
-    return () => clearTimeout(tid);
+    };
+    const t = setInterval(tick, 400);
+    tick();
+    return () => clearInterval(t);
   }, [room?.id, room?.phase, room?.reveal_started_at, refreshLocal]);
 
   const insets = useSafeAreaInsets();
@@ -816,6 +844,10 @@ export default function RoomScreen() {
             ? styles.choiceGuessLayoutFour
             : styles.choiceGuessLayoutMany;
 
+  const guessLocked =
+    (optimisticVotePlayerId !== undefined ? optimisticVotePlayerId !== null : false) ||
+    Boolean(me?.current_vote_player_id);
+
   const renderGuessQuizGrid = () => (
     <View style={[styles.choicesGrid, guessChoicesGridStyle]}>
       {contesters.map((p, index) => {
@@ -830,7 +862,7 @@ export default function RoomScreen() {
             android_ripple={{ color: 'rgba(255,255,255,0.35)' }}
             hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
             onPress={() => onVoteChipPress(p.id)}
-            disabled={!me}
+            disabled={!me || guessLocked}
             style={(s) => {
               const pressed = s.pressed;
               const hovered = 'hovered' in s && (s as { hovered?: boolean }).hovered === true;
@@ -872,29 +904,31 @@ export default function RoomScreen() {
         { flex: 1, backgroundColor: theme.bg, paddingTop: insets.top },
       ]}>
       {inGuess ? (
-        <View style={styles.guessScreen}>
-          <View style={styles.guessHeaderRow}>
-            <View>
-              <Text style={styles.codeLabel}>Room</Text>
-              <Text style={styles.codeCompact}>{room.code}</Text>
+        <TrackPreviewHost
+          uri={room.current_track!.previewUrl}
+          replayToken={`${room.round_number}-${room.current_track!.id}`}>
+          <View style={styles.guessScreen}>
+            <View style={styles.guessHeaderRow}>
+              <View>
+                <Text style={styles.codeLabel}>Room</Text>
+                <Text style={styles.codeCompact}>{room.code}</Text>
+              </View>
+              <View style={styles.guessHeaderRight}>
+                {secondsLeft !== null ? <Text style={styles.timerHeader}>{secondsLeft}s</Text> : null}
+                <PreviewVolumeControl />
+              </View>
             </View>
-            {secondsLeft !== null ? <Text style={styles.timerHeader}>{secondsLeft}s</Text> : null}
-          </View>
-          <PreviewVolumeSlider compact />
-          {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
-          {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
-          {busy ? <Text style={styles.busy}>{busy}</Text> : null}
-          <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
-            {room.settings.partyMode ? (
-              <View style={styles.guessPartyColumn}>
-                <TrackPreview
-                  uri={room.current_track!.previewUrl}
-                  replayToken={`${room.round_number}-${room.current_track!.id}`}
-                />
-                <Text style={styles.partyModeListenHint}>
-                  Open the party speaker link on a TV or second device for the room. The preview also plays here so
-                  you can hear while voting{Platform.OS === 'web' ? ' (use “Tap to play preview sound” if the browser blocks audio)' : ''}.
-                </Text>
+            {loadErr ? <Text style={styles.err}>{loadErr}</Text> : null}
+            {trackNotice ? <Text style={styles.trackNotice}>{trackNotice}</Text> : null}
+            {busy ? <Text style={styles.busy}>{busy}</Text> : null}
+            <View style={[styles.guessFill, { paddingBottom: insets.bottom + 10 }]}>
+              {room.settings.partyMode ? (
+                <View style={styles.guessPartyColumn}>
+                  <TrackPreviewSlot />
+                  <Text style={styles.partyModeListenHint}>
+                    Open the party speaker link on a TV or second device for the room. The preview also plays here so
+                    you can hear while voting{Platform.OS === 'web' ? ' (use “Tap to play preview sound” if the browser blocks audio)' : ''}.
+                  </Text>
                 <Text style={styles.roundMetaParty}>
                   Round {room.round_number} / {room.settings.rounds}
                 </Text>
@@ -911,16 +945,13 @@ export default function RoomScreen() {
                   </ScrollView>
                 )}
                 <Text style={styles.voteHint}>
-                  Tap a name to vote. Tap the same name again to clear — you can skip this round.
+                  Tap a name to vote — your pick locks in for this round (faster correct picks score more).
                 </Text>
               </View>
             ) : (
               <>
                 <View style={styles.guessHalfArt}>
-                  <TrackPreview
-                    uri={room.current_track!.previewUrl}
-                    replayToken={`${room.round_number}-${room.current_track!.id}`}
-                  />
+                  <TrackPreviewSlot />
                   {!room.current_track!.previewUrl ? (
                     <Text style={styles.previewNoteGuess}>
                       No preview clip — guess from title & artist.
@@ -965,13 +996,14 @@ export default function RoomScreen() {
                     </ScrollView>
                   )}
                   <Text style={styles.voteHint}>
-                    Tap a name to vote. Tap the same name again to clear — you can skip this round.
+                    Tap a name to vote — your pick locks in for this round (faster correct picks score more).
                   </Text>
                 </View>
               </>
             )}
           </View>
-        </View>
+          </View>
+        </TrackPreviewHost>
       ) : (
         <View style={styles.nonGuessRoot}>
           <ScrollView
@@ -1133,6 +1165,7 @@ export default function RoomScreen() {
 
             {room.phase === 'reveal' && room.current_track ? (
         <View style={[styles.card, styles.cardSpaced]}>
+          <RoundRecapList entries={room.round_recap} players={players} />
           <Text style={styles.cardTitle}>Answer</Text>
           <Text style={styles.trackTitle}>{room.current_track.name}</Text>
           <Text style={styles.answer}>Owner: {correctPlayer?.nickname ?? 'Unknown'}</Text>
@@ -1140,7 +1173,9 @@ export default function RoomScreen() {
             const src = trackSourceLabelForReveal(room.settings.songSource, room.current_track);
             return src ? <Text style={styles.revealSource}>From: {src}</Text> : null;
           })()}
-          <Text style={styles.muted}>+100 for each correct guess.</Text>
+          <Text style={styles.muted}>
+            Correct picks earn 25–100 pts (faster guesses in the round score higher).
+          </Text>
           {revealSecondsLeft !== null ? (
             <Text style={styles.revealCountdown}>Next round in {revealSecondsLeft}s…</Text>
           ) : null}
@@ -1261,6 +1296,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 6,
+  },
+  guessHeaderRight: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 12,
   },
   codeCompact: { fontSize: 22, fontWeight: '900', color: theme.text, letterSpacing: 3 },
   timerHeader: { fontSize: 22, fontWeight: '900', color: theme.accent },

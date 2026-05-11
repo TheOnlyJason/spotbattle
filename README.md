@@ -16,7 +16,8 @@ Multiplayer party game: connect Spotify, join a room, and guess **whose** track 
 2. **Authentication → Providers → Anonymous sign-in** — enable it.
 3. Run the SQL in **`supabase/migrations/20260429170000_init.sql`** (SQL Editor or CLI).
 4. Run **`supabase/migrations/20260430120000_auto_round_rpcs.sql`** as well. It adds `reveal_started_at` and the RPCs **`finalize_guess_phase`** and **`advance_from_reveal`** (auto reveal after the timer, advance after reveal). Without it, the app logs **`400`** on `/rest/v1/rpc/finalize_guess_phase`.
-5. **Database → Replication** — enable realtime for `rooms` and `room_players` (or run the commented `alter publication` lines at the bottom of the init migration file).
+5. Run **`supabase/migrations/20260511200000_vote_lock_speed_round_recap.sql`** — vote lock (no changing your pick), `vote_submitted_at`, speed-based correct points (25–100), `rooms.round_recap`, and updated **`finalize_guess_phase`**, **`advance_from_reveal`**, and **`try_rematch`**.
+6. **Database → Replication** — enable realtime for `rooms` and `room_players` (or run the commented `alter publication` lines at the bottom of the init migration file).
 
 ### 2. Spotify
 
