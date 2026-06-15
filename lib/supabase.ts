@@ -19,12 +19,22 @@ const rawAnon = (
 const PLACEHOLDER_URL = 'https://placeholder.supabase.co';
 const PLACEHOLDER_ANON = 'sb-placeholder-anon-key-not-configured';
 
-/** Accept `https://xxx.supabase.co` or bare `xxx.supabase.co` from env dashboards. */
+/** Strip whitespace and surrounding quotes from dashboard copy-paste. */
+function sanitizeEnvValue(value: string): string {
+  return value
+    .trim()
+    .replace(/^["']+/, '')
+    .replace(/["']+$/, '')
+    .trim();
+}
+
+/** Accept `https://xxx.supabase.co`, bare `xxx.supabase.co`, or common typos like `https//…`. */
 function normalizeSupabaseUrl(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed.replace(/^\/\//, '')}`;
+  let s = sanitizeEnvValue(value);
+  if (!s) return '';
+  s = s.replace(/^https\/\//i, 'https://').replace(/^http\/\//i, 'http://');
+  if (/^https?:\/\//i.test(s)) return s.replace(/\/+$/, '');
+  return `https://${s.replace(/^\/+/, '').replace(/\/+$/, '')}`;
 }
 
 function isValidHttpUrl(value: string): boolean {
@@ -37,11 +47,12 @@ function isValidHttpUrl(value: string): boolean {
 }
 
 const configuredUrl = normalizeSupabaseUrl(rawUrl);
-export const isSupabaseConfigured = isValidHttpUrl(configuredUrl) && Boolean(rawAnon);
+const configuredAnon = sanitizeEnvValue(rawAnon);
+export const isSupabaseConfigured = isValidHttpUrl(configuredUrl) && Boolean(configuredAnon);
 
 /** Non-empty fallbacks so `createClient` never throws during static export when env vars are missing or malformed. Real requests still require `isSupabaseConfigured`. */
 const url = isSupabaseConfigured ? configuredUrl : PLACEHOLDER_URL;
-const anon = rawAnon || PLACEHOLDER_ANON;
+const anon = configuredAnon || PLACEHOLDER_ANON;
 
 /** In-memory storage for Node / static web export where `window` is undefined. */
 function createMemoryAuthStorage() {
