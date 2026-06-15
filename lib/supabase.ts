@@ -16,11 +16,32 @@ const rawAnon = (
   ''
 ).trim();
 
-export const isSupabaseConfigured = Boolean(rawUrl && rawAnon);
+const PLACEHOLDER_URL = 'https://placeholder.supabase.co';
+const PLACEHOLDER_ANON = 'sb-placeholder-anon-key-not-configured';
 
-/** Non-empty fallbacks so `createClient` never throws during static export when env vars are missing (e.g. Vercel preview without secrets). Real requests still require `isSupabaseConfigured`. */
-const url = rawUrl || 'https://placeholder.supabase.co';
-const anon = rawAnon || 'sb-placeholder-anon-key-not-configured';
+/** Accept `https://xxx.supabase.co` or bare `xxx.supabase.co` from env dashboards. */
+function normalizeSupabaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed.replace(/^\/\//, '')}`;
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+const configuredUrl = normalizeSupabaseUrl(rawUrl);
+export const isSupabaseConfigured = isValidHttpUrl(configuredUrl) && Boolean(rawAnon);
+
+/** Non-empty fallbacks so `createClient` never throws during static export when env vars are missing or malformed. Real requests still require `isSupabaseConfigured`. */
+const url = isSupabaseConfigured ? configuredUrl : PLACEHOLDER_URL;
+const anon = rawAnon || PLACEHOLDER_ANON;
 
 /** In-memory storage for Node / static web export where `window` is undefined. */
 function createMemoryAuthStorage() {
