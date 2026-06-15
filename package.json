@@ -9,7 +9,9 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "build": "expo export --platform web",
-    "export:web": "expo export --platform web"
+    "export:web": "expo export --platform web",
+    "deploy": "npm run build && wrangler deploy",
+    "preview": "npm run build && wrangler dev"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -43,7 +45,8 @@
     "@types/react": "~19.1.0",
     "patch-package": "^8.0.1",
     "react-test-renderer": "19.1.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "wrangler": "^4.100.0"
   },
   "private": true,
   "engines": {
