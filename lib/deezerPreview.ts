@@ -7,7 +7,7 @@ import { Platform } from 'react-native';
  * supplement; not every track exists on Deezer, and large pools take time.
  *
  * **Web:** Deezer does not send `Access-Control-Allow-Origin`, so browsers block direct
- * `fetch` to api.deezer.com. Use same-origin `/api/deezer-preview` (Vercel) or
+ * `fetch` to api.deezer.com. Use same-origin `/api/deezer-preview` (Cloudflare Worker) or
  * `EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL` (e.g. your deployed site) when running web locally.
  *
  * @see https://developers.deezer.com/api/track

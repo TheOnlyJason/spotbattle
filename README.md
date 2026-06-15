@@ -42,25 +42,32 @@ Copy `.env.example` to `.env` in the project root and fill in:
 
 Restart Expo after changing env vars (`npx expo start -c`).
 
-## Deploy web (Vercel)
+## Deploy web (Cloudflare Workers)
 
-The repo includes `vercel.json`: **Other / no framework**, `npm run build` → `expo export --platform web`, publish **`dist`**, and SPA rewrites so routes like `/room/ABCD` work after refresh. `.nvmrc` pins **Node 20** (Expo’s Metro needs Node 20+).
+Static export + SPA routing + Deezer preview proxy run on **Cloudflare Workers** (`wrangler.toml`, `worker.js`).
 
-1. Commit and push these files, then redeploy (or `npx vercel --prod`).
-2. In the Vercel project → **Settings → Environment Variables**, set `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_SPOTIFY_CLIENT_ID` for **Production** (and **Preview** if you use preview URLs).
-3. Confirm the latest deployment **Build** logs show a successful export and that **Output** is `dist` (you should see `index.html` in the build output).
-4. **Spotify**: add your live redirect URI (usually `https://<your-domain>/spotify-auth`) — copy the exact string from the in-app lobby if unsure.
+1. **Build command:** `npm run build` → outputs static files to **`dist/`**
+2. **Deploy command:** `npx wrangler deploy` (requires Node **22+** — see `.nvmrc`)
+3. In Cloudflare → your Worker → **Settings → Variables**, set build-time env vars (no quotes):
+   - `EXPO_PUBLIC_SUPABASE_URL` — e.g. `https://YOUR_PROJECT.supabase.co`
+   - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
+   - `EXPO_PUBLIC_SPOTIFY_CLIENT_ID`
+4. **Spotify:** add your live redirect URI (usually `https://<your-domain>/spotify-auth`) — copy the exact string from the in-app lobby if unsure.
 
-If the lobby loads but you see **`Spotify (502): An unexpected error occurred…`**, the **web deploy is fine** (Supabase + UI work). That message is Spotify’s **Web API** returning a transient 502 after retries—wait a few minutes, try again, or check [Spotify status](https://status.spotify.com/). It is not a Vercel misconfiguration when the room and redirect hint already show correctly.
+Or locally after `npm run build`:
 
-If you see **404: NOT_FOUND** on the Vercel URL, the usual cause is an **empty or wrong output directory** (build never ran `expo export`, or Vercel used a different preset). Fix: ensure this `vercel.json` is deployed, **Node 20.x** in project settings, env vars set, then **Redeploy**.
+```bash
+npx wrangler deploy
+```
+
+If the lobby loads but you see **`Spotify (502): An unexpected error occurred…`**, the **web deploy is fine** (Supabase + UI work). That message is Spotify’s **Web API** returning a transient 502 after retries—wait a few minutes, try again, or check [Spotify status](https://status.spotify.com/).
 
 ### Preview audio on **web** (Deezer)
 
 Spotify’s Web API often omits `preview_url`. The app fills gaps via **Deezer’s public API** using ISRC. Deezer’s responses **do not include `Access-Control-Allow-Origin`**, so **in-browser** `fetch` to `api.deezer.com` fails silently and you see **0 with preview audio** even with a small random sample.
 
-- **Production (Vercel):** the repo includes `api/deezer-preview.js`, which proxies Deezer with open CORS. The web client calls **`/api/deezer-preview`** on the **same origin** as the static app, so previews work after deploy.
-- **Local `expo start --web`:** Metro does not run that API. Set **`EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL`** to your deployed proxy base, e.g. `https://YOUR_APP.vercel.app/api/deezer-preview`, then restart Expo (`-c`). See `.env.example`.
+- **Production (Cloudflare):** `worker.js` serves **`/api/deezer-preview`** on the same origin as the static app.
+- **Local `expo start --web`:** Metro does not run that API. Set **`EXPO_PUBLIC_DEEZER_PREVIEW_PROXY_URL`** to your deployed proxy base, e.g. `https://YOUR_DOMAIN/api/deezer-preview`, then restart Expo (`-c`). See `.env.example`.
 - **iOS / Android / Expo Go:** no CORS — direct Deezer calls work.
 
 ## Run locally

@@ -262,7 +262,7 @@ function spotifyTransientHint(status: number, bodyText: string): string {
     if (b.includes('unexpected error') || b.includes('try again')) {
       return (
         ' (This app already retried several times; try again in a few minutes.)' +
-        ' Temporary Spotify API issue—not your Vercel or redirect URI. status.spotify.com if it persists.'
+        ' Temporary Spotify API issue—not your deploy or redirect URI. status.spotify.com if it persists.'
       );
     }
     return " Spotify’s servers may be busy—try again shortly.";
