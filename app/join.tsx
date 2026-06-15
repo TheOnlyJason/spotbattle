@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 
 import { theme } from '@/constants/theme';
-import { ensureAnonSession } from '@/lib/auth';
+import { ensureAnonSession, formatUserFacingError } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 
 export default function JoinScreen() {
@@ -38,12 +38,12 @@ export default function JoinScreen() {
       if (error) {
         const msg = error.message ?? '';
         if (msg.includes('ROOM_NOT_FOUND')) setErr('Room not found or already started.');
-        else setErr(msg);
+        else setErr(formatUserFacingError({ message: msg }, msg));
         return;
       }
       router.replace(`/room/${c}`);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : 'Join failed');
+      setErr(formatUserFacingError(e, 'Join failed'));
     } finally {
       setBusy(false);
     }

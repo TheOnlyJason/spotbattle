@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RoundRecapList } from '@/components/RoundRecapList';
 import { PreviewVolumeControl, TrackPreviewHost, TrackPreviewSlot } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
-import { ensureAnonSession } from '@/lib/auth';
+import { ensureAnonSession, formatUserFacingError } from '@/lib/auth';
 import { normalizePlayer, normalizeRoom } from '@/lib/gameLogic';
 import { partyDeckUrlForCode } from '@/lib/partyDeckUrl';
 import { supabase } from '@/lib/supabase';
@@ -62,12 +62,12 @@ export default function PartyDeckScreen() {
         });
         if (cancelled) return;
         if (joinErr) {
-          setLoadErr(joinErr.message ?? 'Could not open party deck');
+          setLoadErr(formatUserFacingError(joinErr, 'Could not open party deck'));
           return;
         }
         await refreshLocal();
       } catch (e) {
-        if (!cancelled) setLoadErr(e instanceof Error ? e.message : 'Load failed');
+        if (!cancelled) setLoadErr(formatUserFacingError(e, 'Load failed'));
       }
     })();
     return () => {
@@ -130,11 +130,11 @@ export default function PartyDeckScreen() {
         try {
           await ensureAnonSession();
         } catch (e) {
-          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          setLoadErr(formatUserFacingError(e, 'Session lost'));
           return;
         }
         const { error } = await supabase.rpc('finalize_guess_phase', { p_room_id: roomId });
-        if (error) setLoadErr(error.message);
+        if (error) setLoadErr(formatUserFacingError(error));
         await refreshLocal();
       })();
     }, 500);
@@ -153,10 +153,10 @@ export default function PartyDeckScreen() {
         try {
           await ensureAnonSession();
           const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
-          if (error) setLoadErr(error.message);
+          if (error) setLoadErr(formatUserFacingError(error));
           await refreshLocal();
         } catch (e) {
-          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          setLoadErr(formatUserFacingError(e, 'Session lost'));
         } finally {
           inFlight = false;
         }

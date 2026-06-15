@@ -18,7 +18,7 @@ import { ConfettiCelebration } from '@/components/ConfettiCelebration';
 import { RoundRecapList } from '@/components/RoundRecapList';
 import { PreviewVolumeControl, TrackPreviewHost, TrackPreviewSlot } from '@/components/TrackPreview';
 import { theme } from '@/constants/theme';
-import { ensureAnonSession } from '@/lib/auth';
+import { ensureAnonSession, formatUserFacingError } from '@/lib/auth';
 import { enrichTracksWithDeezerPreviews } from '@/lib/deezerPreview';
 import {
   mergePersistedRoomSettings,
@@ -289,7 +289,7 @@ export default function RoomScreen() {
         if (!cancelled) setMyUserId(data.user?.id ?? null);
         await refreshLocal();
       } catch (e) {
-        if (!cancelled) setLoadErr(e instanceof Error ? e.message : 'Load failed');
+        if (!cancelled) setLoadErr(formatUserFacingError(e, 'Load failed'));
       }
     })();
     return () => {
@@ -357,7 +357,7 @@ export default function RoomScreen() {
         await refreshLocal();
         setSpotifyReady(true);
       } catch (e) {
-        setLoadErr(e instanceof Error ? e.message : 'Spotify login failed');
+        setLoadErr(formatUserFacingError(e, 'Spotify login failed'));
       }
     })();
   }, [response, authRequest, code, refreshLocal]);
@@ -399,7 +399,7 @@ export default function RoomScreen() {
       await refreshLocal();
       setTrackNotice('Mock pool loaded — you can start the game (1+ players in UI dev mode).');
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Mock load failed');
+      setLoadErr(formatUserFacingError(e, 'Mock load failed'));
     } finally {
       setBusy(null);
     }
@@ -473,12 +473,7 @@ export default function RoomScreen() {
       setSpotifyReady(true);
       return true;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Fetch failed';
-      const hint =
-        msg.includes('Failed to fetch') || msg.includes('Network request failed')
-          ? ' Check your network. On web, ad blockers or strict privacy settings can block Spotify’s API.'
-          : '';
-      setLoadErr(`${msg}${hint}`);
+      setLoadErr(formatUserFacingError(e, 'Fetch failed'));
       return false;
     } finally {
       setBusy(null);
@@ -530,7 +525,7 @@ export default function RoomScreen() {
       }
       await refreshLocal();
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Could not save your choice');
+      setLoadErr(formatUserFacingError(e, 'Could not save your choice'));
     }
   }
 
@@ -543,7 +538,7 @@ export default function RoomScreen() {
       if (error) throw new Error(error.message);
       router.replace('/');
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Could not leave room');
+      setLoadErr(formatUserFacingError(e, 'Could not leave room'));
       await refreshLocal();
     } finally {
       setBusy(null);
@@ -580,7 +575,7 @@ export default function RoomScreen() {
       try {
         await persistVoteChoice(rowId, next);
       } catch (e) {
-        setLoadErr(e instanceof Error ? e.message : 'Vote failed');
+        setLoadErr(formatUserFacingError(e, 'Vote failed'));
         await refreshLocal();
       } finally {
         if (voteRequestSeq.current === seq) {
@@ -653,7 +648,7 @@ export default function RoomScreen() {
       roomSettingsRawRef.current = merged;
       await refreshLocal();
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Could not update party mode');
+      setLoadErr(formatUserFacingError(e, 'Could not update party mode'));
     }
   }
 
@@ -709,7 +704,7 @@ export default function RoomScreen() {
       if (error) throw error;
       await refreshLocal();
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : 'Start failed');
+      setLoadErr(formatUserFacingError(e, 'Start failed'));
     } finally {
       setBusy(null);
     }
@@ -746,11 +741,11 @@ export default function RoomScreen() {
         try {
           await ensureAnonSession();
         } catch (e) {
-          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          setLoadErr(formatUserFacingError(e, 'Session lost'));
           return;
         }
         const { error } = await supabase.rpc('finalize_guess_phase', { p_room_id: roomId });
-        if (error) setLoadErr(error.message);
+        if (error) setLoadErr(formatUserFacingError(error));
         await refreshLocal();
       })();
     }, 500);
@@ -770,10 +765,10 @@ export default function RoomScreen() {
         try {
           await ensureAnonSession();
           const { error } = await supabase.rpc('advance_from_reveal', { p_room_id: roomId });
-          if (error) setLoadErr(error.message);
+          if (error) setLoadErr(formatUserFacingError(error));
           await refreshLocal();
         } catch (e) {
-          setLoadErr(e instanceof Error ? e.message : 'Session lost');
+          setLoadErr(formatUserFacingError(e, 'Session lost'));
         } finally {
           inFlight = false;
         }

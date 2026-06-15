@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { theme } from '@/constants/theme';
+import { BACKEND_UNAVAILABLE_MESSAGE } from '@/lib/auth';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
 export default function HomeScreen() {
@@ -22,10 +23,7 @@ export default function HomeScreen() {
         <Text style={styles.logo}>spotBattle</Text>
         <Text style={styles.tagline}>Who likes this song?</Text>
         {!isSupabaseConfigured ? (
-          <Text style={styles.warn}>
-            Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to a `.env` file (see
-            README).
-          </Text>
+          <Text style={styles.warn}>{BACKEND_UNAVAILABLE_MESSAGE}</Text>
         ) : null}
         <View style={styles.actions}>
           <Pressable

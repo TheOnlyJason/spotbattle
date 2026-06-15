@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 
 import { theme } from '@/constants/theme';
-import { ensureAnonSession } from '@/lib/auth';
+import { ensureAnonSession, formatUserFacingError } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { watchUrlForCode } from '@/lib/watchUrl';
 
@@ -39,12 +39,12 @@ export default function WatchJoinScreen() {
       if (error) {
         const msg = error.message ?? '';
         if (msg.includes('ROOM_NOT_FOUND')) setErr('Room not found.');
-        else setErr(msg);
+        else setErr(formatUserFacingError({ message: msg }, msg));
         return;
       }
       router.replace(`/watch/${c}`);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : 'Could not join as audience');
+      setErr(formatUserFacingError(e, 'Could not join as audience'));
     } finally {
       setBusy(false);
     }

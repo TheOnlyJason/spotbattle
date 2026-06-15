@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 
 import { theme } from '@/constants/theme';
-import { ensureAnonSession } from '@/lib/auth';
+import { ensureAnonSession, formatUserFacingError } from '@/lib/auth';
 import { generateRoomCode } from '@/lib/roomCode';
 import { supabase } from '@/lib/supabase';
 import type { RoomSettings, SongSource } from '@/lib/types';
@@ -104,7 +104,7 @@ export default function CreateScreen() {
       }
       throw new Error('Could not find a free room code — try again.');
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : 'Something went wrong');
+      setErr(formatUserFacingError(e));
     } finally {
       setBusy(false);
     }
